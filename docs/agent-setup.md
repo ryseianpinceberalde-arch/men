@@ -4,38 +4,22 @@ The agent is a visible Windows service named **PC Maintenance Agent**. It sends 
 
 ## Build
 
-On a Windows build machine with the .NET 10 SDK:
+On a Windows build machine with the .NET 10 SDK, create the downloadable agent package:
 
 ```powershell
-dotnet publish .\agent\PCMaintenance.Agent\PCMaintenance.Agent.csproj -c Release -r win-x64 --self-contained false -o .\agent\PCMaintenance.Agent\publish\win-x64
+.\scripts\package-agent.ps1
 ```
 
-Copy the publish directory to an administrator-controlled folder on the endpoint, for example `C:\Program Files\PCMaintenance.Agent`. The PC must have the .NET 10 runtime installed. Confirm the service host can reach the organization's Supabase HTTPS endpoint.
-
-For a PC without the .NET 10 runtime, replace `--self-contained false` with `--self-contained true` in the publish command. This includes the runtime in the output. Copy the entire publish directory, not just the `.exe` file.
+The script creates self-contained Windows x64 package parts and a SHA-256 manifest under `dashboard/downloads/`. Commit and push these files so Cloudflare Pages can serve the package. The files are split into 15 MiB parts to stay below Cloudflare Pages' per-file asset limit. Re-run the packaging script and push its output after changing the agent.
 
 ## Register and pair a computer
 
 1. In the dashboard, add a computer. This creates a database asset record and an expiring pairing code.
-2. Open PowerShell with **Run as administrator** on the organization-owned computer. Change to the folder containing the published executable, for example:
-
-   ```powershell
-   Set-Location 'C:\Program Files\PCMaintenance.Agent'
-   ```
-
-   Copy and run the dashboard's command, which starts with `.\PCMaintenance.Agent.exe`. PowerShell requires this prefix to run an executable from the current folder. Running the command from `C:\Windows\System32` will not find the agent. The command includes the public publishable key, device ID, and single-use code; it does not include an administrator password or service-role key.
+2. On that organization-owned Windows PC, open PowerShell with **Run as administrator**. In the dashboard pairing window, click **Copy complete setup command**, paste it into PowerShell, and press Enter. The command downloads and verifies the agent package, pairs the PC, then installs or restarts the Windows service. It works from any PowerShell folder.
 3. The enrollment function validates the code and device ID, consumes the code once, and returns a per-device credential. The agent encrypts the credential with Windows DPAPI and writes it under `%ProgramData%\PCMaintenance.Agent\device.json`. Directory ACLs allow only Local System and local Administrators.
-4. Install and start the Windows service from an elevated PowerShell window:
+4. Confirm PowerShell reports the `PCMaintenanceAgent` service is running. The computer should appear online after its first heartbeat.
 
-   ```powershell
-   $agentExe = 'C:\Program Files\PCMaintenance.Agent\PCMaintenance.Agent.exe'
-   New-Service -Name PCMaintenanceAgent -DisplayName 'PC Maintenance Agent' -BinaryPathName ('"{0}"' -f $agentExe) -StartupType Automatic
-   Start-Service PCMaintenanceAgent
-   ```
-
-5. Confirm the computer becomes online and review the heartbeat in the dashboard.
-
-Pairing codes expire after 30 minutes and are single-use. If enrollment fails, generate a new one. Do not paste a code into a ticket, email, or log. The pairing command briefly includes the code as a process argument, so run it only on the target computer and close the shell afterward.
+Pairing codes expire after 30 minutes and are single-use. If enrollment fails, generate a new one. Do not paste a code into a ticket, email, or log. The setup command briefly includes the code as a process argument, so run it only on the target computer and close the shell afterward.
 
 ## Allow approved service actions
 

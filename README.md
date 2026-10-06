@@ -7,6 +7,7 @@ A role-based operations dashboard backed by Supabase, with a separately installe
 ```text
 dashboard/                    Static HTML, Bootstrap, and JavaScript dashboard
 agent/PCMaintenance.Agent/    .NET 10 Windows service and collectors
+scripts/                       Agent packaging and dashboard build scripts
 supabase/migrations/           PostgreSQL schema, RLS, audit triggers
 supabase/functions/            Authenticated admin, enrollment, and agent APIs
 docs/                          Installation, security, and user guides
@@ -49,13 +50,13 @@ Type-check the Edge Functions with Deno 2 using:
 deno check .\supabase\functions\admin-api\index.ts .\supabase\functions\record-activity\index.ts .\supabase\functions\device-enroll\index.ts .\supabase\functions\agent-api\index.ts .\supabase\functions\evaluate-alerts\index.ts
 ```
 
-Publish the agent on a Windows build machine with the .NET 10 SDK:
+Build the downloadable self-contained Windows agent package on a Windows machine with the .NET 10 SDK:
 
 ```powershell
-dotnet publish .\agent\PCMaintenance.Agent\PCMaintenance.Agent.csproj -c Release -r win-x64 --self-contained false -o .\agent\PCMaintenance.Agent\publish\win-x64
+.\scripts\package-agent.ps1
 ```
 
-The agent uses the Supabase Edge Functions deployed above. It does not accept shell commands, execute scripts, install software, take screenshots, or provide remote desktop.
+Commit and push the generated files under `dashboard/downloads/`; the Pages deployment then serves them to the one-command computer pairing setup. The agent uses the Supabase Edge Functions deployed above. It does not accept shell commands, execute scripts, take screenshots, or provide remote desktop.
 
 ## Current implementation notes
 

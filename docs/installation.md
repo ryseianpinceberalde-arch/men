@@ -5,7 +5,7 @@
 - A Supabase project with Authentication, PostgreSQL, Realtime, and Edge Functions enabled.
 - Supabase CLI for linking the project, applying migrations, and deploying functions.
 - A static HTTPS host for production dashboard use. A local static server is sufficient for development.
-- .NET 10 SDK to build/publish the agent and .NET 10 runtime on each framework-dependent service host.
+- .NET 10 SDK on the Windows build machine to package the self-contained agent; no separate .NET runtime is needed on managed PCs.
 - Windows administrator access for pairing, service installation, and allowlist configuration.
 
 ## Supabase setup

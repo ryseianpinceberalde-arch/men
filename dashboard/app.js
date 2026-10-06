@@ -325,10 +325,12 @@ async function addComputerDialog() {
 
 function showPairingCode(pairing) {
   const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
-  const command = `.\\PCMaintenance.Agent.exe --supabase-url ${quote(window.PCMA_CONFIG.supabaseUrl)} --publishable-key ${quote(window.PCMA_CONFIG.supabasePublishableKey)} --device-id ${quote(pairing.device_id)} --pairing-code ${quote(pairing.pairing_code)}`;
-  showModal({ title: "Pair this authorized computer", submitLabel: "Copy setup command", closeLabel: "Done", body: `<p class="mb-2">On <b>${escapeHtml(pairing.computer_name)}</b>, open PowerShell with <b>Run as administrator</b>. First use <code>Set-Location</code> to open the folder containing the published <code>PCMaintenance.Agent.exe</code>, then run the command below. For example, if you installed the agent in Program Files:</p><pre class="p-3 rounded-2 bg-light border"><code>Set-Location 'C:\\Program Files\\PCMaintenance.Agent'</code></pre><p class="mb-2">The one-time code expires in ${escapeHtml(pairing.expires_in_minutes)} minutes.</p><div class="p-3 rounded-2 bg-light border mb-3"><code class="small text-break" id="pairing-command">${escapeHtml(command)}</code></div><div class="modal-note"><i class="bi bi-exclamation-triangle me-1"></i>This pairing code is shown once. Treat it as a credential and do not send it through an untrusted channel.</div>`, onSubmit: async () => {
+  const installerUrl = new URL("/downloads/install-agent.ps1", window.location.origin).href;
+  const manifestUrl = new URL("/downloads/agent-package.json", window.location.origin).href;
+  const command = `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Uri ${quote(installerUrl)}).Content)) -PackageManifestUrl ${quote(manifestUrl)} -SupabaseUrl ${quote(window.PCMA_CONFIG.supabaseUrl)} -PublishableKey ${quote(window.PCMA_CONFIG.supabasePublishableKey)} -DeviceId ${quote(pairing.device_id)} -PairingCode ${quote(pairing.pairing_code)}`;
+  showModal({ title: "Install and pair this computer", submitLabel: "Copy complete setup command", closeLabel: "Done", body: `<p class="mb-2">On <b>${escapeHtml(pairing.computer_name)}</b>, open <b>PowerShell as administrator</b>, paste the command below, and press <kbd>Enter</kbd>.</p><p class="mb-2">The command downloads and verifies the Windows agent, pairs this computer, then installs and starts the agent service. Keep this window open until PowerShell reports that the service is running.</p><div class="p-3 rounded-2 bg-light border mb-3"><code class="small text-break" id="pairing-command">${escapeHtml(command)}</code></div><div class="modal-note"><i class="bi bi-exclamation-triangle me-1"></i>This one-time setup code expires in ${escapeHtml(pairing.expires_in_minutes)} minutes. Treat it as a credential and do not share this command or a screenshot of it.</div>`, onSubmit: async () => {
     await navigator.clipboard.writeText(command);
-    toast("Setup command copied.");
+    toast("Complete setup command copied.");
     return false;
   } });
 }
