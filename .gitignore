@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+supabase/.env
+supabase/.temp/
+supabase/functions/node_modules/
+dashboard/config.js
+agent/PCMaintenance.Agent/bin/
+agent/PCMaintenance.Agent/obj/
+agent/PCMaintenance.Agent/publish/
+*.user
+*.suo
+.vs/
+.idea/
+Desktop.ini

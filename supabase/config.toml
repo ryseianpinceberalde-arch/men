@@ -1,0 +1,14 @@
+[functions.admin-api]
+verify_jwt = false
+
+[functions.record-activity]
+verify_jwt = false
+
+[functions.device-enroll]
+verify_jwt = false
+
+[functions.agent-api]
+verify_jwt = false
+
+[functions.evaluate-alerts]
+verify_jwt = false
