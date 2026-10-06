@@ -59,6 +59,25 @@ The migration is `supabase/migrations/202610070001_initial_schema.sql`. It creat
 - Configure database backups/retention and an alert evaluation schedule under the organization's policies.
 - Verify RLS with one account per role before onboarding managed endpoints.
 
+## Cloudflare Pages
+
+The dashboard is static, and Supabase continues to provide authentication, the database, and Edge Functions. The Pages build creates the Git-ignored `dashboard/config.js` from the two public Supabase settings supplied to the build.
+
+1. In Cloudflare, open **Workers & Pages** and select **Create application** > **Pages** > **Import an existing Git repository**. Connect GitHub if prompted, then choose `ryseianpinceberalde-arch/men`.
+2. Set **Production branch** to `main`, leave **Root directory** at the repository root, set **Build command** to `node scripts/prepare-cloudflare-pages.mjs`, and set **Build output directory** to `dashboard`. Do not select a framework preset.
+3. Before the first deployment, add these under the production **Build environment variables**:
+
+   | Name | Value |
+   | --- | --- |
+   | `SUPABASE_URL` | Your Supabase Project URL |
+   | `SUPABASE_PUBLISHABLE_KEY` | Your Supabase publishable key (`sb_publishable_...`) |
+
+   These values are for the browser dashboard. Never set a Supabase service-role key here.
+
+4. Save and deploy. When Cloudflare shows a successful deployment, open the assigned `*.pages.dev` address.
+5. In Supabase **Authentication > URL Configuration**, set **Site URL** to that production address and add it to the redirect URL allow list. Use the exact production address, for example `https://your-project.pages.dev/**`.
+6. Sign in and confirm the dashboard loads. The Windows agent still connects directly to Supabase; this deployment hosts only the dashboard.
+
 ## Troubleshooting
 
 - **Dashboard reports configuration missing:** ensure `dashboard/config.js` exists and contains the URL and publishable key, then hard-refresh.

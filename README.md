@@ -29,7 +29,7 @@ docs/                          Installation, security, and user guides
 
    The trigger creates each new profile as a viewer. After bootstrap, invite users from **Users** in the dashboard.
 6. Copy `dashboard/config.example.js` to `dashboard/config.js` and set the project URL and **publishable** key. That file is ignored by Git.
-7. Serve the `dashboard/` directory over HTTP for local use, or deploy its static files to an HTTPS web host. Add the resulting URL to Supabase Authentication's allowed redirect URLs.
+7. Serve the `dashboard/` directory over HTTP for local use, or deploy it to Cloudflare Pages using the setup in [docs/installation.md](docs/installation.md#cloudflare-pages). Add the resulting URL to Supabase Authentication's allowed redirect URLs.
 
 See [docs/installation.md](docs/installation.md) for local development and deployment details, [docs/database.md](docs/database.md) for schema/RLS, and [docs/agent-setup.md](docs/agent-setup.md) for Windows installation.
 
