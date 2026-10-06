@@ -14,7 +14,7 @@ if (-not $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRol
 }
 
 $manifestUri = [uri]$PackageManifestUrl
-if ($manifestUri.Scheme -ne "https" -and -not ($manifestUri.Scheme -eq "http" -and [uri]::IsLoopback($manifestUri.Host))) {
+if ($manifestUri.Scheme -ne "https" -and -not ($manifestUri.Scheme -eq "http" -and $manifestUri.IsLoopback)) {
     throw "The agent download must use HTTPS (HTTP is allowed only on localhost)."
 }
 $agentDirectory = Join-Path $env:ProgramFiles "PCMaintenance.Agent"
