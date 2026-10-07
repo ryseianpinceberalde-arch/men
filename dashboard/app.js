@@ -384,7 +384,7 @@ async function renderComputerDetail() {
   if (state.detailTab === "overview") panel = overviewPanel(computer, specs, latest, technicianNames);
   else if (state.detailTab === "hardware") panel = hardwarePanel(computer, specs);
   else if (state.detailTab === "monitoring") panel = await monitoringPanel(computer);
-  else if (state.detailTab === "software") panel = await detailTable(computer, "installed_software", "id, software_name, version, publisher, install_date, scanned_at", softwareDetailColumns, "software", { sort: "software_name", ascending: true });
+  else if (state.detailTab === "software") panel = await softwarePanel(computer, canManage);
   else if (state.detailTab === "processes") panel = await processesPanel(computer, canManage);
   else if (state.detailTab === "services") panel = await servicesPanel(computer, canManage);
   else if (state.detailTab === "maintenance") panel = await maintenanceDetail(computer, canManage);
@@ -442,6 +442,14 @@ const softwareDetailColumns = [
   { label: "INSTALL DATE", render: (row) => escapeHtml(formatDate(row.install_date)) },
   { label: "LAST SCAN", render: (row) => escapeHtml(formatDate(row.scanned_at, true)) },
 ];
+
+async function softwarePanel(computer, canManage) {
+  const installed = await detailTable(computer, "installed_software", "id, software_name, version, publisher, install_date, scanned_at", softwareDetailColumns, "software", { sort: "software_name", ascending: true });
+  const running = canManage
+    ? `<section class="panel mt-3"><div class="panel-title"><div><h3>Running processes</h3><p>Choose the matching process name and PID to stop a running application. Installed software names do not always match process names.</p></div></div>${await processesPanel(computer, canManage)}</section>`
+    : "";
+  return `${installed}${running}`;
+}
 
 async function detailTable(computer, table, select, columns, key, { sort = "created_at", ascending = false, searchFields = [] } = {}) {
   const list = listState(`detail-${key}`, sort, ascending);
@@ -528,7 +536,7 @@ function confirmPowerAction(computer, type) {
 function confirmStopProcess(computer, processId, processName) {
   const normalized = processName.toLowerCase();
   if (processDenylist.has(normalized)) return toast("This system process is protected by the denylist.", "warning");
-  showModal({ title: "Stop process?", body: `<div class="alert alert-warning small">Stop <b>${escapeHtml(processName)}</b> (PID ${escapeHtml(processId)}) on <b>${escapeHtml(computer.computer_name)}</b>?</div><p class="modal-note">The agent checks its protected process denylist and confirms the PID still belongs to this process before requesting a graceful stop.</p>`, submitLabel: "Queue stop request", danger: true, onSubmit: async () => {
+  showModal({ title: "Stop process?", body: `<div class="alert alert-warning small">Stop <b>${escapeHtml(processName)}</b> (PID ${escapeHtml(processId)}) on <b>${escapeHtml(computer.computer_name)}</b>? This may close the app and lose unsaved work.</div><p class="modal-note">The agent checks its protected process denylist and confirms the PID still belongs to this process before stopping it.</p>`, submitLabel: "Queue stop request", danger: true, onSubmit: async () => {
     await queueCommand(computer.id, "STOP_PROCESS", { process_id: Number(processId), process_name: processName });
     await navigate("computer-detail", { push: false });
   } });
