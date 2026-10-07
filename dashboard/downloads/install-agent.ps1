@@ -90,7 +90,13 @@ $wasServiceRunning = $false
 
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if (-not $service) {
-    New-Service -Name $serviceName -DisplayName "PC Maintenance Agent" -BinaryPathName ('"{0}"' -f $agentExecutable) -StartupType Automatic | Out-Null
+    $serviceControl = Join-Path $env:SystemRoot "System32\sc.exe"
+    $binaryPath = '"{0}"' -f $agentExecutable
+    $serviceCreationOutput = & $serviceControl create $serviceName "binPath=" $binaryPath "start=" "auto" "DisplayName=" "PC Maintenance Agent" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $serviceCreationDetails = ($serviceCreationOutput | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join " "
+        throw "Windows could not register the PC Maintenance Agent service (sc.exe exit code $LASTEXITCODE). $serviceCreationDetails"
+    }
     $service = Get-Service -Name $serviceName
 }
 if ($service.Status -ne "Running") { Start-Service -Name $serviceName }
