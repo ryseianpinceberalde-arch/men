@@ -21,7 +21,7 @@ if (!OperatingSystem.IsWindows())
 }
 
 var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddWindowsService(options => options.ServiceName = "PC Maintenance Agent");
+builder.Services.AddWindowsService(options => options.ServiceName = "PCMaintenanceAgent");
 builder.Logging.AddEventLog(settings => settings.SourceName = "PC Maintenance Agent");
 builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
 builder.Services.AddSingleton(serviceProvider => serviceProvider.GetRequiredService<IOptions<AgentOptions>>().Value);
