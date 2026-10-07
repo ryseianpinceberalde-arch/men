@@ -4,18 +4,18 @@ The agent is a visible Windows service named **PC Maintenance Agent**. It sends 
 
 ## Build
 
-On a Windows build machine with the .NET 10 SDK, create the downloadable agent package:
+On a Windows build machine with the .NET 10 SDK and .NET Framework C# compiler (`csc.exe`), create the downloadable agent package and native setup program:
 
 ```powershell
 .\scripts\package-agent.ps1
 ```
 
-The script creates self-contained Windows x64 package parts and a SHA-256 manifest under `dashboard/downloads/`. Commit and push these files so Cloudflare Pages can serve the package. The files are split into 15 MiB parts to stay below Cloudflare Pages' per-file asset limit. Re-run the packaging script and push its output after changing the agent.
+The script creates a native Windows setup executable, self-contained Windows x64 package parts, and a SHA-256 manifest under `dashboard/downloads/`. Commit and push these files so Cloudflare Pages can serve them. The setup executable downloads and verifies the package, enrolls the PC, and installs the Windows service without running a PowerShell script or changing the computer's execution policy. Package files are split into 15 MiB parts to stay below Cloudflare Pages' per-file asset limit. Re-run the packaging script and push its output after changing the agent.
 
 ## Register and pair a computer
 
 1. In the dashboard, add a computer. This creates a database asset record and an expiring pairing code.
-2. On that organization-owned Windows PC, open PowerShell with **Run as administrator**. In the dashboard pairing window, click **Copy complete setup command**, paste it into PowerShell, and press Enter. The command downloads and verifies the latest agent package, pairs the PC, updates an existing installation, and starts the Windows service. It works from any PowerShell folder.
+2. On that organization-owned Windows PC, open PowerShell with **Run as administrator**. In the dashboard pairing window, click **Copy complete setup command**, paste it into PowerShell, and press Enter. The command downloads the native setup program, which verifies the latest agent package, pairs the PC, updates an existing installation, and starts the Windows service. It works from any PowerShell folder and does not change PowerShell's execution policy.
 3. The enrollment function validates the code and device ID, consumes the code once, and returns a per-device credential. The agent encrypts the credential with Windows DPAPI and writes it under `%ProgramData%\PCMaintenance.Agent\device.json`. Directory ACLs allow only Local System and local Administrators.
 4. Confirm PowerShell reports the `PCMaintenanceAgent` service is running. The computer should appear online after its first heartbeat.
 

@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $projectPath = Join-Path $repoRoot "agent\PCMaintenance.Agent\PCMaintenance.Agent.csproj"
+$setupSourcePath = Join-Path $repoRoot "agent\PCMaintenance.Agent.Setup\Program.cs"
 $downloadDirectory = Join-Path $repoRoot "dashboard\downloads"
 $buildDirectory = Join-Path $env:TEMP ("pcma-agent-package-" + [guid]::NewGuid().ToString("N"))
 $publishDirectory = Join-Path $buildDirectory "publish"
@@ -51,8 +52,30 @@ try {
         [System.Text.UTF8Encoding]::new($false)
     )
 
-    Write-Host "Created the Windows agent download package with $($parts.Count) Cloudflare-compatible files."
-    Write-Host "Package parts and manifest: $downloadDirectory"
+    $compilerCandidates = @(
+        (Join-Path $env:SystemRoot "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+        (Join-Path $env:SystemRoot "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+    )
+    $csharpCompiler = $compilerCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $csharpCompiler) { throw "The .NET Framework C# compiler (csc.exe) is required to build the native setup program." }
+
+    $setupExecutable = Join-Path $downloadDirectory "PCMaintenance.Agent.Setup.exe"
+    $frameworkDirectory = Split-Path -Parent $csharpCompiler
+    $setupCompilerArguments = @(
+        "/nologo",
+        "/target:exe",
+        "/platform:x64",
+        "/out:$setupExecutable",
+        "/reference:$(Join-Path $frameworkDirectory 'System.Web.Extensions.dll')",
+        "/reference:$(Join-Path $frameworkDirectory 'System.IO.Compression.dll')",
+        "/reference:$(Join-Path $frameworkDirectory 'System.ServiceProcess.dll')",
+        $setupSourcePath
+    )
+    & $csharpCompiler @setupCompilerArguments
+    if ($LASTEXITCODE -ne 0) { throw "The native setup program build failed with exit code $LASTEXITCODE." }
+
+    Write-Host "Created the Windows agent package and native setup program with $($parts.Count) Cloudflare-compatible package files."
+    Write-Host "Package parts, manifest, and setup program: $downloadDirectory"
 }
 finally {
     if (Test-Path -LiteralPath $buildDirectory) {
