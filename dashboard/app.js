@@ -447,10 +447,13 @@ const softwareDetailColumns = [
 
 async function softwarePanel(computer, canManage) {
   const installed = await detailTable(computer, "installed_software", "id, software_name, version, publisher, install_date, scanned_at", softwareDetailColumns, "software", { sort: "software_name", ascending: true });
+  const scan = canManage
+    ? '<div class="d-flex justify-content-end mb-2"><button class="btn btn-soft btn-sm" data-action="refresh-inventory" data-type="GET_SOFTWARE"><i class="bi bi-arrow-repeat me-1"></i>Scan installed software</button></div>'
+    : "";
   const running = canManage
     ? `<section class="panel mt-3"><div class="panel-title"><div><h3>Running processes</h3><p>Choose the matching process name and PID to stop a running application. The list refreshes automatically after a Kill EXE request.</p></div></div>${await processesPanel(computer, canManage)}</section>`
     : "";
-  return `${installed}${running}`;
+  return `${scan}${installed}${running}`;
 }
 
 async function detailTable(computer, table, select, columns, key, { sort = "created_at", ascending = false, searchFields = [] } = {}) {
