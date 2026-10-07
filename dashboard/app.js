@@ -458,10 +458,16 @@ async function softwarePanel(computer, canManage) {
 
 async function detailTable(computer, table, select, columns, key, { sort = "created_at", ascending = false, searchFields = [] } = {}) {
   const list = listState(`detail-${key}`, sort, ascending);
-  let query = supabase.from(table).select(select, { count: "exact" }).eq("computer_id", computer.id);
-  if (list.search && searchFields.length) query = query.or(searchFields.map((fieldName) => `${fieldName}.ilike.%${list.search}%`).join(","));
-  query = query.order(list.sort, { ascending: list.ascending, nullsFirst: false }).range((list.page - 1) * list.pageSize, list.page * list.pageSize - 1);
-  const { data, error, count } = await query;
+  const buildQuery = () => {
+    let query = supabase.from(table).select(select, { count: "exact" }).eq("computer_id", computer.id);
+    if (list.search && searchFields.length) query = query.or(searchFields.map((fieldName) => `${fieldName}.ilike.%${list.search}%`).join(","));
+    return query.order(list.sort, { ascending: list.ascending, nullsFirst: false });
+  };
+  let { data, error, count } = await buildQuery().range((list.page - 1) * list.pageSize, list.page * list.pageSize - 1);
+  if (error && (error.code === "PGRST103" || error.status === 416 || /requested range not satisfiable/i.test(error.message ?? ""))) {
+    list.page = 1;
+    ({ data, error, count } = await buildQuery().range(0, list.pageSize - 1));
+  }
   if (error) throw error;
   list.rows = data ?? []; list.count = count ?? 0;
   return tablePanel({ columns, rows: list.rows, search: list.search, page: list.page, pageSize: list.pageSize, count: list.count, placeholder: `Search ${key}...`, emptyTitle: `No ${key} inventory`, emptyText: "Request an inventory scan from the connected agent." });
