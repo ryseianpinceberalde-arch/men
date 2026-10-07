@@ -25,7 +25,7 @@ Pairing codes expire after 30 minutes and are single-use. If enrollment fails, g
 
 Service start/stop/restart is blocked unless the exact Windows service name is in the agent's local `Agent:ApprovedServiceNames` array in `appsettings.json`. Review organization change control and the service's impact before adding it. Critical names in the agent denylist are always rejected. The installed service must be restarted for configuration edits to take effect.
 
-Process stop requests are rejected for core Windows process names and PIDs. The agent rechecks the PID/name pairing before acting. Computer restart and shutdown are requested through Windows with a 60-second delay and `forceApplicationsClosed=false`; applications may prevent shutdown.
+Process stop requests are rejected for core Windows process names and PIDs. The agent rechecks the PID/name pairing before acting. Computer restart is requested through Windows with a 60-second delay; shutdown uses a 3-second delay. Both use `forceApplicationsClosed=false`, so applications may prevent the operation.
 
 ## Operations and removal
 
