@@ -19,8 +19,9 @@ if ($manifestUri.Scheme -ne "https" -and -not ($manifestUri.Scheme -eq "http" -a
 }
 $agentDirectory = Join-Path $env:ProgramFiles "PCMaintenance.Agent"
 $agentExecutable = Join-Path $agentDirectory "PCMaintenance.Agent.exe"
+$serviceName = "PCMaintenanceAgent"
+$wasServiceRunning = $false
 
-if (-not (Test-Path -LiteralPath $agentExecutable)) {
     $manifest = Invoke-RestMethod -UseBasicParsing -Uri $manifestUri.AbsoluteUri
     $archiveHash = [string]$manifest.sha256
     $packageParts = @($manifest.parts)
@@ -59,32 +60,40 @@ if (-not (Test-Path -LiteralPath $agentExecutable)) {
         $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -ne $archiveHash) { throw "The agent download failed its integrity check. Please try again." }
 
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        $wasServiceRunning = $null -ne $service -and $service.Status -eq "Running"
+        if ($wasServiceRunning) {
+            Stop-Service -Name $serviceName -Force
+            (Get-Service -Name $serviceName).WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        }
+
         New-Item -ItemType Directory -Path $agentDirectory -Force | Out-Null
         Expand-Archive -LiteralPath $archivePath -DestinationPath $agentDirectory -Force
+        & $agentExecutable --supabase-url $SupabaseUrl --publishable-key $PublishableKey --device-id $DeviceId --pairing-code $PairingCode
+        if ($LASTEXITCODE -ne 0) { throw "Pairing failed. Generate a fresh setup command in the dashboard and try again." }
     }
     finally {
-        $resolvedTempRoot = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-        $resolvedDownloadDirectory = [System.IO.Path]::GetFullPath($downloadDirectory)
-        if ($resolvedDownloadDirectory.StartsWith($resolvedTempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolvedDownloadDirectory) -match '^PCMaintenance\.Agent-[a-f0-9]{32}$') {
-            Remove-Item -LiteralPath $resolvedDownloadDirectory -Recurse -Force
+        try {
+            if ($wasServiceRunning) {
+                $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                if ($service -and $service.Status -ne "Running") { Start-Service -Name $serviceName }
+            }
+        }
+        finally {
+            $resolvedTempRoot = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+            $resolvedDownloadDirectory = [System.IO.Path]::GetFullPath($downloadDirectory)
+            if ($resolvedDownloadDirectory.StartsWith($resolvedTempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolvedDownloadDirectory) -match '^PCMaintenance\.Agent-[a-f0-9]{32}$') {
+                Remove-Item -LiteralPath $resolvedDownloadDirectory -Recurse -Force
+            }
         }
     }
-}
 
-& $agentExecutable --supabase-url $SupabaseUrl --publishable-key $PublishableKey --device-id $DeviceId --pairing-code $PairingCode
-if ($LASTEXITCODE -ne 0) { throw "Pairing failed. Generate a fresh setup command in the dashboard and try again." }
-
-$service = Get-Service -Name "PCMaintenanceAgent" -ErrorAction SilentlyContinue
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if (-not $service) {
-    New-Service -Name "PCMaintenanceAgent" -DisplayName "PC Maintenance Agent" -BinaryPathName ('"{0}"' -f $agentExecutable) -StartupType Automatic | Out-Null
-    $service = Get-Service -Name "PCMaintenanceAgent"
+    New-Service -Name $serviceName -DisplayName "PC Maintenance Agent" -BinaryPathName ('"{0}"' -f $agentExecutable) -StartupType Automatic | Out-Null
+    $service = Get-Service -Name $serviceName
 }
-if ($service.Status -eq "Running") {
-    Restart-Service -Name "PCMaintenanceAgent"
-}
-else {
-    Start-Service -Name "PCMaintenanceAgent"
-}
+if ($service.Status -ne "Running") { Start-Service -Name $serviceName }
 
-Get-Service -Name "PCMaintenanceAgent"
+Get-Service -Name $serviceName
 Write-Host "Setup complete. The PC Maintenance Agent service is installed and running."

@@ -20,6 +20,11 @@ public sealed class CommandService(
     WindowsServiceManager services,
     ILogger<CommandService> logger)
 {
+    private const uint TokenQuery = 0x0008;
+    private const uint TokenAdjustPrivileges = 0x0020;
+    private const uint PrivilegeEnabled = 0x00000002;
+    private const int ErrorNotAllAssigned = 1300;
+
     private static readonly HashSet<string> AllowedCommands = new(StringComparer.Ordinal)
     {
         "GET_SYSTEM_INFO", "GET_HARDWARE_INFO", "GET_SOFTWARE", "GET_PROCESSES", "GET_SERVICES", "GET_SYSTEM_STATUS",
@@ -80,15 +85,118 @@ public sealed class CommandService(
         return text;
     }
 
-    private static string RequestShutdown(bool restart)
+    private string RequestShutdown(bool restart)
     {
         const uint plannedApplicationReason = 0x80040000;
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Restart and shutdown requests require Windows.");
         var action = restart ? "restart" : "shut down";
-        var success = InitiateSystemShutdownEx(null, $"An authorized administrator requested this computer to {action}.", 60, false, restart, plannedApplicationReason);
-        if (!success) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Windows rejected the shutdown request.");
+
+        if (!OpenProcessToken(GetCurrentProcess(), TokenQuery | TokenAdjustPrivileges, out var tokenHandle))
+            throw CreateWindowsError("Could not open the agent service security token", Marshal.GetLastWin32Error());
+
+        try
+        {
+            var previousPrivileges = EnableShutdownPrivilege(tokenHandle);
+            var success = false;
+            var shutdownError = 0;
+            try
+            {
+                success = InitiateSystemShutdownEx(null, $"An authorized administrator requested this computer to {action}.", 60, false, restart, plannedApplicationReason);
+                if (!success) shutdownError = Marshal.GetLastWin32Error();
+            }
+            finally
+            {
+                RestoreShutdownPrivilege(tokenHandle, previousPrivileges);
+            }
+
+            if (!success) throw CreateWindowsError($"Windows rejected the {action} request", shutdownError);
+        }
+        finally
+        {
+            _ = CloseHandle(tokenHandle);
+        }
+
         return $"Windows accepted a graceful {action} request with a 60-second delay. Applications can prevent the shutdown.";
     }
+
+    private static TokenPrivileges EnableShutdownPrivilege(IntPtr tokenHandle)
+    {
+        if (!LookupPrivilegeValue(null, "SeShutdownPrivilege", out var shutdownPrivilege))
+            throw CreateWindowsError("Could not look up the Windows shutdown privilege", Marshal.GetLastWin32Error());
+
+        var requestedPrivileges = new TokenPrivileges
+        {
+            PrivilegeCount = 1,
+            Privileges = new LuidAndAttributes { Luid = shutdownPrivilege, Attributes = PrivilegeEnabled },
+        };
+        if (!AdjustTokenPrivileges(tokenHandle, false, ref requestedPrivileges, (uint)Marshal.SizeOf<TokenPrivileges>(), out var previousPrivileges, out _))
+            throw CreateWindowsError("Could not enable the Windows shutdown privilege", Marshal.GetLastWin32Error());
+
+        var adjustmentError = Marshal.GetLastWin32Error();
+        if (adjustmentError == ErrorNotAllAssigned)
+            throw new InvalidOperationException("The agent service account does not have the Windows shutdown privilege.");
+
+        return previousPrivileges;
+    }
+
+    private void RestoreShutdownPrivilege(IntPtr tokenHandle, TokenPrivileges previousPrivileges)
+    {
+        if (previousPrivileges.PrivilegeCount == 0) return;
+        if (!AdjustTokenPrivileges(tokenHandle, false, ref previousPrivileges, (uint)Marshal.SizeOf<TokenPrivileges>(), out _, out _))
+            logger.LogError("Could not restore the agent process's previous shutdown privilege state. Windows error {ErrorCode}.", Marshal.GetLastWin32Error());
+    }
+
+    private static System.ComponentModel.Win32Exception CreateWindowsError(string operation, int errorCode)
+    {
+        var systemMessage = new System.ComponentModel.Win32Exception(errorCode).Message;
+        return new System.ComponentModel.Win32Exception(errorCode, $"{operation} (Windows error {errorCode}: {systemMessage})");
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid
+    {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LuidAndAttributes
+    {
+        public Luid Luid;
+        public uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenPrivileges
+    {
+        public uint PrivilegeCount;
+        public LuidAndAttributes Privileges;
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool LookupPrivilegeValue(string? systemName, string name, out Luid luid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AdjustTokenPrivileges(
+        IntPtr tokenHandle,
+        [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+        ref TokenPrivileges newState,
+        uint bufferLength,
+        out TokenPrivileges previousState,
+        out uint returnLength);
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -15,7 +15,7 @@ The script creates self-contained Windows x64 package parts and a SHA-256 manife
 ## Register and pair a computer
 
 1. In the dashboard, add a computer. This creates a database asset record and an expiring pairing code.
-2. On that organization-owned Windows PC, open PowerShell with **Run as administrator**. In the dashboard pairing window, click **Copy complete setup command**, paste it into PowerShell, and press Enter. The command downloads and verifies the agent package, pairs the PC, then installs or restarts the Windows service. It works from any PowerShell folder.
+2. On that organization-owned Windows PC, open PowerShell with **Run as administrator**. In the dashboard pairing window, click **Copy complete setup command**, paste it into PowerShell, and press Enter. The command downloads and verifies the latest agent package, pairs the PC, updates an existing installation, and starts the Windows service. It works from any PowerShell folder.
 3. The enrollment function validates the code and device ID, consumes the code once, and returns a per-device credential. The agent encrypts the credential with Windows DPAPI and writes it under `%ProgramData%\PCMaintenance.Agent\device.json`. Directory ACLs allow only Local System and local Administrators.
 4. Confirm PowerShell reports the `PCMaintenanceAgent` service is running. The computer should appear online after its first heartbeat.
 
@@ -33,6 +33,6 @@ Process stop requests are rejected for core Windows process names and PIDs. The 
 - Hardware inventory includes bounded storage-device/volume details and non-loopback network adapter details when Windows permits the read. Adapter MAC and IP addresses are visible to users who can access that computer under RLS.
 - Service logs use the Windows Application event log with source **PC Maintenance Agent**.
 - To stop/remove it as an administrator: `Stop-Service PCMaintenanceAgent`, then `sc.exe delete PCMaintenanceAgent`. Remove the installed program directory and `%ProgramData%\PCMaintenance.Agent` only after the organization authorizes device retirement. Use the dashboard's **Revoke agent** action first.
-- To re-pair, revoke the old credential in the dashboard, generate a new pairing code, and run the enrollment command again.
+- To update or re-pair an existing agent, generate a fresh pairing code and run the copied setup command as administrator. It replaces the installed agent, rotates its device credential, and restarts the service. Before retiring a PC, use the dashboard's **Revoke agent** action.
 
 The agent is separate from the dashboard and can be stopped and removed by an authorized local administrator.
