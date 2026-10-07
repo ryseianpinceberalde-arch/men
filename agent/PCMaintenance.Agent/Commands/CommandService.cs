@@ -88,12 +88,9 @@ public sealed class CommandService(
     private string RequestShutdown(bool restart)
     {
         const uint plannedApplicationReason = 0x80040000;
-        const uint restartDelaySeconds = 60;
-        const uint shutdownDelaySeconds = 3;
+        const uint countdownSeconds = 3;
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Restart and shutdown requests require Windows.");
         var action = restart ? "restart" : "shut down";
-        var delaySeconds = restart ? restartDelaySeconds : shutdownDelaySeconds;
-
         if (!OpenProcessToken(GetCurrentProcess(), TokenQuery | TokenAdjustPrivileges, out var tokenHandle))
             throw CreateWindowsError("Could not open the agent service security token", Marshal.GetLastWin32Error());
 
@@ -104,7 +101,7 @@ public sealed class CommandService(
             var shutdownError = 0;
             try
             {
-                success = InitiateSystemShutdownEx(null, $"An authorized administrator requested this computer to {action}.", delaySeconds, false, restart, plannedApplicationReason);
+                success = InitiateSystemShutdownEx(null, $"An authorized administrator requested this computer to {action}.", countdownSeconds, false, restart, plannedApplicationReason);
                 if (!success) shutdownError = Marshal.GetLastWin32Error();
             }
             finally
@@ -119,7 +116,7 @@ public sealed class CommandService(
             _ = CloseHandle(tokenHandle);
         }
 
-        return $"Windows accepted a graceful {action} request with a {delaySeconds}-second delay. Applications can prevent the shutdown.";
+        return $"Windows accepted a graceful {action} request with a {countdownSeconds}-second countdown. Applications will not be force-closed and can prevent the operation.";
     }
 
     private static TokenPrivileges EnableShutdownPrivilege(IntPtr tokenHandle)
