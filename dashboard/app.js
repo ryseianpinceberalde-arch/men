@@ -448,7 +448,7 @@ const softwareDetailColumns = [
 async function softwarePanel(computer, canManage) {
   const installed = await detailTable(computer, "installed_software", "id, software_name, version, publisher, install_date, scanned_at", softwareDetailColumns, "software", { sort: "software_name", ascending: true });
   const running = canManage
-    ? `<section class="panel mt-3"><div class="panel-title"><div><h3>Running processes</h3><p>Choose the matching process name and PID to stop a running application. Installed software names do not always match process names.</p></div></div>${await processesPanel(computer, canManage)}</section>`
+    ? `<section class="panel mt-3"><div class="panel-title"><div><h3>Running processes</h3><p>Choose the matching process name and PID to stop a running application. The list refreshes automatically after a Kill EXE request.</p></div></div>${await processesPanel(computer, canManage)}</section>`
     : "";
   return `${installed}${running}`;
 }
@@ -517,11 +517,11 @@ async function commandsDetail(computer) {
   return `<div class="panel mb-3"><div class="panel-title"><div><h3>Approved agent actions</h3><p>Commands expire if the computer does not receive them within five minutes.</p></div></div><div class="d-flex flex-wrap gap-2">${["GET_SYSTEM_INFO", "GET_HARDWARE_INFO", "GET_SYSTEM_STATUS", "GET_SOFTWARE", "GET_PROCESSES", "GET_SERVICES"].map((type) => `<button class="btn btn-soft btn-sm" data-action="queue-command" data-type="${type}">${escapeHtml(type.replaceAll("_", " "))}</button>`).join("")}${state.profile.role !== "viewer" ? `<button class="btn btn-outline-danger btn-sm ms-auto" data-action="confirm-power" data-type="RESTART_PC"><i class="bi bi-arrow-clockwise me-1"></i>Restart</button><button class="btn btn-danger btn-sm" data-action="confirm-power" data-type="SHUTDOWN_PC"><i class="bi bi-power me-1"></i>Shut down</button>` : ""}</div></div>${await detailTable(computer, "commands", "id, command_type, status, result, error_message, created_at, expires_at", columns, "commands", { sort: "created_at" })}`;
 }
 
-async function queueCommand(computerId, commandType, parameters = {}) {
+async function queueCommand(computerId, commandType, parameters = {}, { notify = true } = {}) {
   const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
   const { data, error } = await supabase.from("commands").insert({ computer_id: computerId, command_type: commandType, parameters, created_by: state.user.id, expires_at: expiresAt }).select("id").single();
   if (error) throw error;
-  toast(`${commandType.replaceAll("_", " ")} queued; the computer must check in before expiry.`);
+  if (notify) toast(`${commandType.replaceAll("_", " ")} queued; the computer must check in before expiry.`);
   return data.id;
 }
 
@@ -539,7 +539,13 @@ function confirmStopProcess(computer, processId, processName) {
   const normalized = normalizeProcessName(processName);
   if (processDenylist.has(normalized)) return toast("This system process is protected by the denylist.", "warning");
   showModal({ title: "Kill executable?", body: `<div class="alert alert-warning small">Kill <b>${escapeHtml(processExecutableName(processName))}</b> (PID ${escapeHtml(processId)}) on <b>${escapeHtml(computer.computer_name)}</b>? This immediately ends the app and may lose unsaved work.</div><p class="modal-note">The agent checks its protected process denylist and confirms the PID still belongs to this process before killing it.</p>`, submitLabel: "Queue EXE kill", danger: true, onSubmit: async () => {
-    await queueCommand(computer.id, "STOP_PROCESS", { process_id: Number(processId), process_name: processName });
+    await queueCommand(computer.id, "STOP_PROCESS", { process_id: Number(processId), process_name: processName }, { notify: false });
+    try {
+      await queueCommand(computer.id, "GET_PROCESSES", {}, { notify: false });
+      toast("EXE kill and automatic process refresh queued. The agent runs them in order.");
+    } catch (error) {
+      toast(`Kill request queued, but the automatic process refresh could not be queued: ${error.message}`, "warning");
+    }
     await navigate("computer-detail", { push: false });
   } });
 }
