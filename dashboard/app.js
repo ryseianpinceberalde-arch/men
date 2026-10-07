@@ -6,7 +6,9 @@ const content = document.querySelector("#page-content");
 const state = { user: null, profile: null, view: "dashboard", detailId: null, detailTab: "overview", realtime: null, chart: null, searchTimer: null, evaluationTimer: null, list: { page: 1, pageSize: 10, search: "", filter: "", sort: "created_at", ascending: false, rows: [] }, lists: {} };
 const roleNames = { administrator: "Administrator", technician: "Technician", viewer: "Viewer" };
 const maintenanceTypes = ["Preventive Maintenance", "Corrective Maintenance", "Hardware Maintenance", "Software Maintenance", "Network Maintenance", "Security Maintenance"];
-const processDenylist = new Set(["system", "system idle process", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe", "svchost.exe"]);
+const normalizeProcessName = (name) => String(name ?? "").trim().replace(/\.exe$/i, "").toLowerCase();
+const processExecutableName = (name) => /\.exe$/i.test(String(name ?? "")) ? String(name) : `${String(name ?? "")}.exe`;
+const processDenylist = new Set(["system", "system idle process", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe", "svchost.exe"].map(normalizeProcessName));
 const serviceDenylist = new Set(["rpcss", "dcomlaunch", "eventlog", "wininit", "winmgmt", "windefend", "mpssvc", "plugplay", "samss"]);
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: "bi-grid-1x2" },
@@ -464,12 +466,12 @@ async function detailTable(computer, table, select, columns, key, { sort = "crea
 
 async function processesPanel(computer, canManage) {
   const columns = [
-    { label: "PROCESS", render: (row) => `<b>${escapeHtml(row.process_name)}</b>` },
+    { label: "EXECUTABLE", render: (row) => `<b>${escapeHtml(processExecutableName(row.process_name))}</b>` },
     { label: "PID", key: "process_id", sort: "process_id" },
     { label: "CPU", render: (row) => `${Number(row.cpu_usage).toFixed(1)}%` },
     { label: "MEMORY", render: (row) => escapeHtml(formatBytes(row.memory_usage)) },
     { label: "UPDATED", render: (row) => escapeHtml(relativeTime(row.updated_at)) },
-    ...(canManage ? [{ label: "ACTION", render: (row) => processDenylist.has(row.process_name.toLowerCase()) ? '<span class="text-secondary small">Protected process</span>' : `<button class="btn btn-sm btn-outline-danger" data-action="stop-process" data-id="${escapeHtml(row.process_id)}" data-name="${escapeHtml(row.process_name)}">Stop process</button>` }] : []),
+    ...(canManage ? [{ label: "ACTION", render: (row) => processDenylist.has(normalizeProcessName(row.process_name)) ? '<span class="text-secondary small">Protected process</span>' : `<button class="btn btn-sm btn-outline-danger" data-action="stop-process" data-id="${escapeHtml(row.process_id)}" data-name="${escapeHtml(row.process_name)}">Kill EXE</button>` }] : []),
   ];
   const actions = canManage ? '<button class="btn btn-soft btn-sm" data-action="refresh-inventory" data-type="GET_PROCESSES"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>' : "";
   return `<div class="d-flex justify-content-end mb-2">${actions}</div>${await detailTable(computer, "processes", "id, process_id, process_name, cpu_usage, memory_usage, updated_at", columns, "processes", { sort: "process_name", ascending: true, searchFields: ["process_name"] })}`;
@@ -534,9 +536,9 @@ function confirmPowerAction(computer, type) {
 }
 
 function confirmStopProcess(computer, processId, processName) {
-  const normalized = processName.toLowerCase();
+  const normalized = normalizeProcessName(processName);
   if (processDenylist.has(normalized)) return toast("This system process is protected by the denylist.", "warning");
-  showModal({ title: "Stop process?", body: `<div class="alert alert-warning small">Stop <b>${escapeHtml(processName)}</b> (PID ${escapeHtml(processId)}) on <b>${escapeHtml(computer.computer_name)}</b>? This may close the app and lose unsaved work.</div><p class="modal-note">The agent checks its protected process denylist and confirms the PID still belongs to this process before stopping it.</p>`, submitLabel: "Queue stop request", danger: true, onSubmit: async () => {
+  showModal({ title: "Kill executable?", body: `<div class="alert alert-warning small">Kill <b>${escapeHtml(processExecutableName(processName))}</b> (PID ${escapeHtml(processId)}) on <b>${escapeHtml(computer.computer_name)}</b>? This immediately ends the app and may lose unsaved work.</div><p class="modal-note">The agent checks its protected process denylist and confirms the PID still belongs to this process before killing it.</p>`, submitLabel: "Queue EXE kill", danger: true, onSubmit: async () => {
     await queueCommand(computer.id, "STOP_PROCESS", { process_id: Number(processId), process_name: processName });
     await navigate("computer-detail", { push: false });
   } });
