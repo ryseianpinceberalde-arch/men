@@ -302,11 +302,11 @@ async function addComputerDialog() {
   let technicians = [];
   try { technicians = await listTechnicians(); } catch { /* Assignment can be added later from user management. */ }
   const options = technicians.map((technician) => ({ value: technician.id, label: technician.full_name || technician.id }));
-  const form = `${field("Computer name", "computer_name", { required: true, placeholder: "LAB-PC-01" })}${field("Device ID", "device_id", { required: true, placeholder: "LAB-PC-01", help: "A stable identifier printed in your asset inventory." })}${field("Assigned user", "assigned_user", { placeholder: "Name or email" })}${options.length ? field("Assign technician", "technician_id", { type: "select", options }) : ""}<div class="modal-note"><i class="bi bi-shield-check me-1"></i>Only install the agent on a computer your organization owns or is authorized to manage.</div>`;
+  const form = `${field("Computer name", "computer_name", { required: true, placeholder: "LAB-PC-01" })}${field("Assigned user", "assigned_user", { placeholder: "Name or email" })}${options.length ? field("Assign technician", "technician_id", { type: "select", options }) : ""}<div class="modal-note mb-3"><i class="bi bi-fingerprint me-1"></i>A unique device ID will be generated automatically.</div><div class="modal-note"><i class="bi bi-shield-check me-1"></i>Only install the agent on a computer your organization owns or is authorized to manage.</div>`;
   showModal({ title: "Register computer", body: form, submitLabel: "Create and pair agent", onSubmit: async (data) => {
     const name = String(data.get("computer_name") ?? "").trim();
-    const deviceId = String(data.get("device_id") ?? "").trim();
-    if (name.length > 120 || deviceId.length > 120) throw new Error("Names and device IDs must be 120 characters or fewer.");
+    if (name.length > 120) throw new Error("Computer names must be 120 characters or fewer.");
+    const deviceId = crypto.randomUUID();
     const { data: computer, error } = await supabase.from("computers").insert({ computer_name: name, device_id: deviceId, assigned_user: String(data.get("assigned_user") ?? "").trim() || null, status: "offline" }).select("id, device_id, computer_name").single();
     if (error) throw error;
     const technicianId = String(data.get("technician_id") ?? "");
