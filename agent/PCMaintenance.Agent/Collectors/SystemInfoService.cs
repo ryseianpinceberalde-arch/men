@@ -63,10 +63,23 @@ public sealed class SystemInfoService
         {
             using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
             var name = key?.GetValue("ProductName")?.ToString() ?? "Windows";
-            var version = key?.GetValue("DisplayVersion")?.ToString() ?? key?.GetValue("CurrentBuildNumber")?.ToString() ?? Environment.OSVersion.Version.ToString();
-            return (name, version);
+            var build = key?.GetValue("CurrentBuildNumber")?.ToString();
+            var buildNumber = int.TryParse(build, out var parsedBuild) ? parsedBuild : Environment.OSVersion.Version.Build;
+            var version = key?.GetValue("DisplayVersion")?.ToString() ?? build ?? Environment.OSVersion.Version.ToString();
+            return (ResolveOperatingSystemName(name, buildNumber), version);
         }
         catch (Exception) { return ("Windows", Environment.OSVersion.Version.ToString()); }
+    }
+
+    public static string ResolveOperatingSystemName(string productName, int buildNumber)
+    {
+        // Windows 11 can retain a Windows 10 ProductName. Its first release is build 22000.
+        // Restrict the correction to Windows 10 names so Windows Server keeps its identity.
+        const string windows10 = "Windows 10";
+        if (buildNumber >= 22000 && (productName.Equals(windows10, StringComparison.OrdinalIgnoreCase)
+            || productName.StartsWith(windows10 + " ", StringComparison.OrdinalIgnoreCase)))
+            return "Windows 11" + productName[windows10.Length..];
+        return productName;
     }
 
     private static double ReadMemoryLoad()

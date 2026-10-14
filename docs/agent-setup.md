@@ -32,6 +32,7 @@ The Windows service starts a hidden helper under each active signed-in desktop s
 ## Operations and removal
 
 - The service sends a heartbeat every 45 seconds, checks for commands every 15 seconds, and refreshes hardware every 30 minutes. Status history is limited to one stored sample per five minutes.
+- Operating-system names use the Windows build number to distinguish Windows 11 from a stale Windows 10 registry product name, preserving the edition. After updating an affected agent, its next successful heartbeat corrects the dashboard name; no database migration is needed. Run `dotnet run --project tests/agent/NetworkChecks.csproj -c Release -- --system` to check the collector against the local Windows OS caption as well as the regression cases.
 - Hardware inventory includes bounded storage-device/volume details and non-loopback network adapter details when Windows permits the read. Adapter MAC and IP addresses are visible to users who can access that computer under RLS.
 - Service logs use the Windows Application event log with source **PC Maintenance Agent**.
 - To stop/remove it as an administrator: `Stop-Service PCMaintenanceAgent`, then `sc.exe delete PCMaintenanceAgent`. Remove the installed program directory and `%ProgramData%\PCMaintenance.Agent` only after the organization authorizes device retirement. Use the dashboard's **Revoke agent** action first.
