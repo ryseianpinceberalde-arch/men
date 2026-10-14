@@ -6,7 +6,7 @@ public sealed record HardwareSnapshot(string? Manufacturer, string? Model, strin
 public sealed record StorageDeviceSnapshot(string Name, string? Model, string? SerialNumber, long SizeBytes, long FreeBytes, string? FileSystem);
 public sealed record NetworkAdapterSnapshot(string Name, string? Description, string Type, string Status, string? MacAddress, IReadOnlyList<string> IpAddresses);
 public sealed record SoftwareRow(string SoftwareName, string? Version, string? Publisher, string? InstallDate);
-public sealed record ProcessRow(int ProcessId, string ProcessName, double CpuUsage, long MemoryUsage);
+public sealed record ProcessRow(int ProcessId, string ProcessName, string ApplicationName, double CpuUsage, long MemoryUsage, DateTimeOffset? ProcessStartedAt, bool IsTaskbarApp);
 public sealed record ServiceRow(string ServiceName, string DisplayName, string Status, string StartupType);
 public sealed record AgentCommand(Guid Id, string CommandType, System.Text.Json.JsonElement Parameters, DateTimeOffset ExpiresAt);
 public sealed record AgentCommandEnvelope(AgentCommand? Command);

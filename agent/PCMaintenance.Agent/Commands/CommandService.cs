@@ -18,6 +18,7 @@ public sealed class CommandService(
     SoftwareInventoryService software,
     ProcessService processes,
     WindowsServiceManager services,
+    NetworkWorker network,
     ILogger<CommandService> logger)
 {
     private const uint TokenQuery = 0x0008;
@@ -29,6 +30,7 @@ public sealed class CommandService(
     {
         "GET_SYSTEM_INFO", "GET_HARDWARE_INFO", "GET_SOFTWARE", "GET_PROCESSES", "GET_SERVICES", "GET_SYSTEM_STATUS",
         "STOP_PROCESS", "START_SERVICE", "STOP_SERVICE", "RESTART_SERVICE", "RESTART_PC", "SHUTDOWN_PC",
+        "GET_NETWORK_STATUS", "RUN_NETWORK_SPEED_TEST",
     };
 
     public Task<CommandExecution> ExecuteAsync(AgentCommand command, CancellationToken cancellationToken)
@@ -40,6 +42,22 @@ public sealed class CommandService(
 
         try
         {
+            if (command.CommandType == "RUN_NETWORK_SPEED_TEST") return RunNetworkSpeedTestAsync(cancellationToken);
+            if (command.CommandType == "GET_NETWORK_STATUS")
+            {
+                network.RequestRefresh();
+                return Task.FromResult(new CommandExecution("completed", new { message = "Network sample requested; telemetry will follow." }));
+            }
+            if (command.CommandType == "STOP_PROCESS")
+            {
+                var outcome = processes.Stop(
+                    ReadProcessId(command.Parameters),
+                    ReadRequiredText(command.Parameters, "process_name"),
+                    ReadRequiredText(command.Parameters, "process_started_at"),
+                    ReadRequiredBoolean(command.Parameters, "force"));
+                return Task.FromResult(new CommandExecution(outcome.Status, outcome.Result, outcome.ErrorMessage));
+            }
+
             object result = command.CommandType switch
             {
                 "GET_SYSTEM_INFO" => new { system = systemInfo.Collect(), specs = hardware.Collect() },
@@ -48,7 +66,6 @@ public sealed class CommandService(
                 "GET_SOFTWARE" => new { software = software.Collect(options.MaximumInventoryRows) },
                 "GET_PROCESSES" => new { processes = processes.Collect(options.MaximumInventoryRows) },
                 "GET_SERVICES" => new { services = services.Collect(options.MaximumInventoryRows) },
-                "STOP_PROCESS" => new { message = processes.Stop(ReadProcessId(command.Parameters), ReadRequiredText(command.Parameters, "process_name")) },
                 "START_SERVICE" or "STOP_SERVICE" or "RESTART_SERVICE" => new { message = services.Execute(command.CommandType, ReadRequiredText(command.Parameters, "service_name")) },
                 "RESTART_PC" => new { message = RequestShutdown(restart: true) },
                 "SHUTDOWN_PC" => new { message = RequestShutdown(restart: false) },
@@ -68,6 +85,16 @@ public sealed class CommandService(
         }
     }
 
+    private async Task<CommandExecution> RunNetworkSpeedTestAsync(CancellationToken token)
+    {
+        try
+        {
+            var result = await network.RunSpeedTestAsync(token);
+            return new(result.Status, new { speed_test = result }, result.Error);
+        }
+        catch (InvalidOperationException ex) { return new("rejected", new { message = ex.Message }, ex.Message); }
+    }
+
     private static int ReadProcessId(JsonElement parameters)
     {
         if (!parameters.TryGetProperty("process_id", out var value) || !value.TryGetInt32(out var processId) || processId <= 0)
@@ -83,6 +110,13 @@ public sealed class CommandService(
         if (string.IsNullOrWhiteSpace(text) || text.Length > 256)
             throw new InvalidOperationException($"A valid {key.Replace('_', ' ')} is required.");
         return text;
+    }
+
+    private static bool ReadRequiredBoolean(JsonElement parameters, string key)
+    {
+        if (!parameters.TryGetProperty(key, out var value) || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw new InvalidOperationException($"A valid {key.Replace('_', ' ')} flag is required.");
+        return value.GetBoolean();
     }
 
     private string RequestShutdown(bool restart)

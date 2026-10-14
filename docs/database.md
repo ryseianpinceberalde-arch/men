@@ -13,7 +13,7 @@ One Supabase project represents one organization. A future multi-organization de
 | Service desk | `maintenance_records`, `maintenance_schedules`, `problems` |
 | Oversight | `alerts`, `alert_settings`, `activity_logs` |
 
-Foreign keys cascade computer-owned inventory and records when a computer is removed. User references point at `auth.users` through `profiles`. Device credentials and one-time enrollment codes are hashed in server-only tables. Command types, statuses, process parameters, service parameters, sizes, expiry, and request rate are constrained in the database.
+Foreign keys cascade computer-owned inventory and records when a computer is removed. User references point at `auth.users` through `profiles`. Device credentials and one-time enrollment codes are hashed in server-only tables. Command types, statuses, process identity parameters, idempotency keys, service parameters, sizes, expiry, and request rate are constrained in the database. Process inventory includes the application label and exact start time when Windows permits those reads. Process termination is dispatched only through the authenticated administrator Edge Function; the direct command insert policy excludes `STOP_PROCESS`.
 
 `computer_specs.storage_devices` and `computer_specs.network_adapters` store bounded JSON arrays reported by the agent. They include disk/volume capacity and network adapter identifiers and addresses; access follows the same role and computer-assignment policy as the rest of the hardware specification.
 
@@ -29,7 +29,7 @@ The helper functions `current_user_role`, `can_access_computer`, and `can_manage
 
 ## Realtime and monitoring retention
 
-`computers`, `computer_status`, `alerts`, `commands`, `maintenance_records`, and `maintenance_schedules` are added to the Realtime publication. Reads remain subject to RLS. Agents report every 45 seconds; the API stores a `computer_status` history sample no more often than every five minutes. The dashboard summary uses a compact RLS-aware SQL function rather than loading full histories.
+`computers`, `computer_status`, `computer_specs`, `installed_software`, `processes`, `services`, `alerts`, `commands`, `maintenance_records`, `maintenance_schedules`, `problems`, `activity_logs`, and `computer_assignments` are added to the Realtime publication by the dated migrations. Reads remain subject to RLS. Agents report every 45 seconds; the API stores a `computer_status` history sample no more often than every five minutes. The dashboard summary uses a compact RLS-aware SQL function rather than loading full histories. Apply the dated migrations in order; process termination adds a confirmation lifecycle state, exact process start times, idempotency keys, and command-linked audit records. The taskbar-visibility migration adds a boolean process marker populated only when an active desktop-session helper sees a visible application window.
 
 ## First administrator
 

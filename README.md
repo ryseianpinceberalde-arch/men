@@ -60,6 +60,8 @@ Commit and push the generated files under `dashboard/downloads/`; the Pages depl
 
 ## Current implementation notes
 
+- Network Overview, Wi-Fi Monitoring, and Internet Monitoring use the existing device authentication and Windows service. See [docs/network-monitoring.md](docs/network-monitoring.md) for migration/deployment steps, measurement semantics, access controls, tests, and hardware limitations. Existing installations need the updated agent binaries before they can report network data.
+
 - Computer monitoring is sent on a 45-second heartbeat and historical status is retained at most once per computer every five minutes.
 - Software, process, and service inventories are requested from the agent; service actions are blocked unless a service name is explicitly allowlisted in the local agent configuration.
 - Offline and overdue-schedule evaluation runs while an administrator dashboard is open. For continuous evaluation, schedule `evaluate-alerts` from your approved scheduler and set a private `CRON_SECRET` with `supabase secrets set CRON_SECRET=...`.

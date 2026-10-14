@@ -68,6 +68,7 @@ try {
         "/out:$setupExecutable",
         "/reference:$(Join-Path $frameworkDirectory 'System.Web.Extensions.dll')",
         "/reference:$(Join-Path $frameworkDirectory 'System.IO.Compression.dll')",
+        "/reference:$(Join-Path $frameworkDirectory 'System.Management.dll')",
         "/reference:$(Join-Path $frameworkDirectory 'System.ServiceProcess.dll')",
         $setupSourcePath
     )

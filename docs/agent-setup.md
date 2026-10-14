@@ -19,13 +19,15 @@ The script creates a native Windows setup executable, self-contained Windows x64
 3. The enrollment function validates the code and device ID, consumes the code once, and returns a per-device credential. The agent encrypts the credential with Windows DPAPI and writes it under `%ProgramData%\PCMaintenance.Agent\device.json`. Directory ACLs allow only Local System and local Administrators.
 4. Confirm PowerShell reports the `PCMaintenanceAgent` service is running. The computer should appear online after its first heartbeat.
 
+For an existing computer that needs an agent update or re-pair, open its detail page and choose **Re-pair agent**. This temporarily marks the computer as pending, so its current agent stops reporting until the new setup command is run on that same PC.
+
 Pairing codes expire after 30 minutes and are single-use. If enrollment fails, generate a new one. Do not paste a code into a ticket, email, or log. The setup command briefly includes the code as a process argument, so run it only on the target computer and close the shell afterward.
 
 ## Allow approved service actions
 
 Service start/stop/restart is blocked unless the exact Windows service name is in the agent's local `Agent:ApprovedServiceNames` array in `appsettings.json`. Review organization change control and the service's impact before adding it. Critical names in the agent denylist are always rejected. The installed service must be restarted for configuration edits to take effect.
 
-Process stop requests are rejected for core Windows process names and PIDs. The agent rechecks the PID/name pairing before acting. Computer restart and shutdown use a 3-second Windows countdown with `forceApplicationsClosed=false`; applications are not force-closed and may prevent the operation.
+The Windows service starts a hidden helper under each active signed-in desktop session so it can identify apps with visible taskbar windows; it sends process IDs to the service and does not collect window titles. Process stop requests are administrator-only and are rejected for core Windows process names/PIDs, known security-process names, Windows service-session processes, stale identities, and PID reuse. After an administrator confirms **End Task Now**, the agent verifies the exact PID/name/start-time pairing and immediately force-closes only that process. It uses the agent's existing Windows access rights and never elevates automatically. Computer restart and shutdown use a 3-second Windows countdown with `forceApplicationsClosed=false`; applications are not force-closed and may prevent the operation.
 
 ## Operations and removal
 

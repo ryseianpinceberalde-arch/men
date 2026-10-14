@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Management;
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -83,13 +84,23 @@ internal static class Program
         var temporaryDirectory = Path.Combine(Path.GetTempPath(), "PCMaintenance.Agent.Setup-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temporaryDirectory);
         var archivePath = Path.Combine(temporaryDirectory, "agent.zip");
-        var agentDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PCMaintenance.Agent");
+        var programFilesDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var installId = Guid.NewGuid().ToString("N");
+        var agentDirectory = Path.Combine(programFilesDirectory, "PCMaintenance.Agent");
+        var stagingDirectory = Path.Combine(programFilesDirectory, "PCMaintenance.Agent.Setup-" + installId);
+        var backupDirectory = Path.Combine(programFilesDirectory, "PCMaintenance.Agent.Backup-" + installId);
         var agentExecutable = Path.Combine(agentDirectory, "PCMaintenance.Agent.exe");
+        var stagedAgentExecutable = Path.Combine(stagingDirectory, "PCMaintenance.Agent.exe");
         var serviceWasRunning = false;
         var setupCompleted = false;
+        var originalDirectoryBackedUp = false;
 
         try
         {
+            if (Directory.Exists(stagingDirectory) || File.Exists(stagingDirectory) || Directory.Exists(backupDirectory) || File.Exists(backupDirectory))
+                throw new IOException("The setup staging path already exists. Run setup again.");
+            Directory.CreateDirectory(stagingDirectory);
+
             Console.WriteLine("Downloading the Windows agent...");
             using (var archive = new FileStream(archivePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
@@ -118,6 +129,9 @@ internal static class Program
             }
 
             Console.WriteLine("Package verified. Installing the agent...");
+            ExtractPackage(archivePath, stagingDirectory);
+            if (!File.Exists(stagedAgentExecutable)) throw new InvalidDataException("The agent package does not contain its Windows executable.");
+
             var service = FindService();
             if (service != null)
             {
@@ -136,9 +150,7 @@ internal static class Program
                 }
             }
 
-            Directory.CreateDirectory(agentDirectory);
-            ExtractPackage(archivePath, agentDirectory);
-            if (!File.Exists(agentExecutable)) throw new InvalidDataException("The agent package does not contain its Windows executable.");
+            StopOrphanedTaskbarMonitors(agentExecutable);
 
             var enrollmentArguments = new[]
             {
@@ -147,9 +159,16 @@ internal static class Program
                 "--device-id", values["--device-id"],
                 "--pairing-code", values["--pairing-code"],
             };
-            var enrollmentExitCode = RunProcess(agentExecutable, enrollmentArguments, agentDirectory);
+            var enrollmentExitCode = RunProcess(stagedAgentExecutable, enrollmentArguments, stagingDirectory);
             if (enrollmentExitCode != 0)
                 throw new InvalidOperationException("Pairing failed. Generate a fresh setup command in the dashboard and try again.");
+
+            if (Directory.Exists(agentDirectory))
+            {
+                MoveDirectoryWithRetry(agentDirectory, backupDirectory, TimeSpan.FromSeconds(30));
+                originalDirectoryBackedUp = true;
+            }
+            MoveDirectoryWithRetry(stagingDirectory, agentDirectory, TimeSpan.FromSeconds(30));
 
             service = FindService();
             if (service == null) CreateService(agentExecutable);
@@ -171,10 +190,41 @@ internal static class Program
 
             setupCompleted = true;
             Console.WriteLine("Setup complete. The PC Maintenance Agent service is installed and running.");
+            if (originalDirectoryBackedUp)
+            {
+                try
+                {
+                    DeleteBackupDirectory(backupDirectory, programFilesDirectory);
+                    originalDirectoryBackedUp = false;
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine("The previous agent files could not be removed from " + backupDirectory + ": " + exception.Message);
+                }
+            }
+        }
+        catch
+        {
+            if (originalDirectoryBackedUp)
+            {
+                try
+                {
+                    StopInstalledServiceForRollback();
+                    if (Directory.Exists(agentDirectory))
+                        MoveDirectoryWithRetry(agentDirectory, stagingDirectory, TimeSpan.FromSeconds(30));
+                    MoveDirectoryWithRetry(backupDirectory, agentDirectory, TimeSpan.FromSeconds(30));
+                    originalDirectoryBackedUp = false;
+                }
+                catch (Exception rollbackError)
+                {
+                    Console.Error.WriteLine("The previous agent installation remains at " + backupDirectory + " because rollback failed: " + rollbackError.Message);
+                }
+            }
+            throw;
         }
         finally
         {
-            if (!setupCompleted && serviceWasRunning)
+            if (!setupCompleted && serviceWasRunning && !originalDirectoryBackedUp)
             {
                 var service = FindService();
                 if (service != null)
@@ -195,7 +245,105 @@ internal static class Program
             }
 
             DeleteTemporaryDirectory(temporaryDirectory);
+            DeleteStagingDirectory(stagingDirectory, programFilesDirectory);
         }
+    }
+
+    private static void StopOrphanedTaskbarMonitors(string installedExecutable)
+    {
+        var expectedExecutable = Path.GetFullPath(installedExecutable);
+        var expectedCommandLine = "\"" + expectedExecutable + "\" --taskbar-monitor";
+        using (var searcher = new ManagementObjectSearcher(
+            "SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = 'PCMaintenance.Agent.exe'"))
+        using (var processes = searcher.Get())
+        {
+            foreach (ManagementObject candidate in processes)
+            using (candidate)
+            {
+                var executable = candidate["ExecutablePath"] as string;
+                var commandLine = candidate["CommandLine"] as string;
+                if (!String.Equals(executable, expectedExecutable, StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(commandLine, expectedCommandLine, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                Process process;
+                try
+                {
+                    process = Process.GetProcessById(Convert.ToInt32(candidate["ProcessId"]));
+                }
+                catch (ArgumentException)
+                {
+                    continue;
+                }
+
+                using (process)
+                {
+                    if (!process.HasExited) process.Kill();
+                    if (!process.WaitForExit(10000))
+                        throw new System.TimeoutException("The old taskbar monitor did not stop. Close the signed-in session and try setup again.");
+                }
+            }
+        }
+    }
+
+    private static void MoveDirectoryWithRetry(string sourceDirectory, string destinationDirectory, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            try
+            {
+                Directory.Move(sourceDirectory, destinationDirectory);
+                return;
+            }
+            catch (IOException exception)
+            {
+                var win32Error = exception.HResult & 0xffff;
+                if (win32Error != 5 && win32Error != 32 && win32Error != 33) throw;
+                if (DateTime.UtcNow >= deadline)
+                    throw new IOException("An agent file is still in use. Setup waited 30 seconds; wait for the agent to stop and try again.", exception);
+                System.Threading.Thread.Sleep(250);
+            }
+        }
+    }
+
+    private static void StopInstalledServiceForRollback()
+    {
+        var service = FindService();
+        if (service == null) return;
+        try
+        {
+            if (service.Status != ServiceControllerStatus.Stopped)
+            {
+                service.Stop();
+                service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
+            }
+        }
+        finally
+        {
+            service.Dispose();
+        }
+    }
+
+    private static void DeleteStagingDirectory(string directory, string programFilesDirectory)
+    {
+        if (!Directory.Exists(directory)) return;
+        var root = Path.GetFullPath(programFilesDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var resolvedDirectory = Path.GetFullPath(directory);
+        if (!resolvedDirectory.StartsWith(root, StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(Path.GetFileName(resolvedDirectory), "^PCMaintenance\\.Agent\\.Setup-[a-f0-9]{32}$"))
+            throw new IOException("Refusing to remove a staging path outside the setup folder.");
+        Directory.Delete(resolvedDirectory, true);
+    }
+
+    private static void DeleteBackupDirectory(string directory, string programFilesDirectory)
+    {
+        var root = Path.GetFullPath(programFilesDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var resolvedDirectory = Path.GetFullPath(directory);
+        if (!resolvedDirectory.StartsWith(root, StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(Path.GetFileName(resolvedDirectory), "^PCMaintenance\\.Agent\\.Backup-[a-f0-9]{32}$"))
+            throw new IOException("Refusing to remove a backup path outside the setup folder.");
+        if (Directory.Exists(resolvedDirectory)) Directory.Delete(resolvedDirectory, true);
     }
 
     private static Uri ValidateDownloadUri(string value)

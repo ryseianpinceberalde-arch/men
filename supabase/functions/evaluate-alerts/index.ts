@@ -15,6 +15,8 @@ Deno.serve(async (request) => {
     }
     if (!authorized) return reply({ error: "Administrator access is required." }, 403);
     const admin = serviceClient();
+    const { error: retentionError } = await admin.rpc("prune_network_history");
+    if (retentionError) throw retentionError;
     const { data: settings, error: settingsError } = await admin.from("alert_settings").select("offline_after_minutes").eq("id", true).single();
     if (settingsError) throw settingsError;
     const threshold = new Date(Date.now() - settings.offline_after_minutes * 60_000).toISOString();

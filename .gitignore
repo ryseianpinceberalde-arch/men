@@ -8,6 +8,8 @@ dashboard/config.js
 agent/PCMaintenance.Agent/bin/
 agent/PCMaintenance.Agent/obj/
 agent/PCMaintenance.Agent/publish/
+tests/agent/bin/
+tests/agent/obj/
 *.user
 *.suo
 .vs/

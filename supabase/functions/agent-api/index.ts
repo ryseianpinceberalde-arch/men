@@ -1,4 +1,5 @@
 import { isRecord, preflight, reply, serviceClient, sha256 } from "../_shared/http.ts";
+import { cleanNetworkBatch } from "../_shared/network.ts";
 
 const limits = { software: 2500, processes: 2000, services: 2500 };
 const textValue = (value: unknown, maximum = 200): string | null =>
@@ -49,7 +50,8 @@ async function storeInventory(admin: ReturnType<typeof serviceClient>, computerI
       const processId = Number(item.process_id);
       const processName = textValue(item.process_name);
       if (!Number.isInteger(processId) || processId <= 0 || !processName) return [];
-      return [{ computer_id: computerId, process_id: processId, process_name: processName, cpu_usage: Number(item.cpu_usage) || 0, memory_usage: Math.max(0, Number(item.memory_usage) || 0), updated_at: new Date().toISOString() }];
+      const processStartedAt = textValue(item.process_started_at, 50);
+      return [{ computer_id: computerId, process_id: processId, process_name: processName, application_name: textValue(item.application_name, 300) ?? processName, is_taskbar_app: item.is_taskbar_app === true, process_started_at: processStartedAt && Number.isFinite(Date.parse(processStartedAt)) ? processStartedAt : null, cpu_usage: Number(item.cpu_usage) || 0, memory_usage: Math.max(0, Number(item.memory_usage) || 0), updated_at: new Date().toISOString() }];
     });
     for (let start = 0; start < items.length; start += 500) {
       const { error } = await admin.from(table).upsert(items.slice(start, start + 500), { onConflict: "computer_id,process_id" });
@@ -87,9 +89,20 @@ Deno.serve(async (request) => {
     const computerRelation = credential.computers as unknown as { enrollment_status: string };
     if (computerRelation.enrollment_status !== "active") return reply({ error: "This device is not active." }, 403);
     const computerId = credential.computer_id;
-    const body: unknown = await request.json();
+    const raw = await request.text();
+    if (raw.length > 2_000_000) return reply({ error: "Agent payload is too large." }, 413);
+    const body: unknown = JSON.parse(raw);
     if (!isRecord(body) || typeof body.action !== "string") return reply({ error: "Invalid agent request." }, 400);
     await admin.from("agent_credentials").update({ last_used_at: new Date().toISOString() }).eq("computer_id", computerId);
+
+    if (body.action === "network") {
+      let batch;
+      try { batch = cleanNetworkBatch(body.samples, body.speed_tests); }
+      catch { return reply({ error: "Invalid network telemetry payload." }, 400); }
+      const { data, error } = await admin.rpc("ingest_network_batch", { target_computer: computerId, batch });
+      if (error) throw error;
+      return reply({ ok: true, settings: data });
+    }
 
     if (body.action === "heartbeat") {
       if (!isRecord(body.system) || !isRecord(body.specs)) return reply({ error: "System status and hardware information are required." }, 400);
@@ -179,10 +192,11 @@ Deno.serve(async (request) => {
     }
 
     if (body.action === "command_result") {
-      if (typeof body.command_id !== "string" || !["completed", "failed", "rejected"].includes(String(body.status))) return reply({ error: "Invalid command result." }, 400);
-      const { data: command, error: commandError } = await admin.from("commands").select("id, computer_id, command_type, status, expires_at").eq("id", body.command_id).eq("computer_id", computerId).maybeSingle();
+      if (typeof body.command_id !== "string" || !["completed", "failed", "rejected", "awaiting_confirmation"].includes(String(body.status))) return reply({ error: "Invalid command result." }, 400);
+      const { data: command, error: commandError } = await admin.from("commands").select("id, computer_id, command_type, parameters, status, expires_at").eq("id", body.command_id).eq("computer_id", computerId).maybeSingle();
       if (commandError) throw commandError;
       if (!command) return reply({ error: "Command is unavailable." }, 404);
+      if (body.status === "awaiting_confirmation" && (command.command_type !== "STOP_PROCESS" || command.parameters?.force !== false)) return reply({ error: "This command cannot request force confirmation." }, 400);
       if (command.status === body.status && command.status !== "pending") return reply({ ok: true });
       if (!["received", "processing"].includes(command.status)) return reply({ error: "Command is unavailable." }, 404);
       if (command.status === "received" && new Date(command.expires_at).getTime() <= Date.now()) {
@@ -190,6 +204,10 @@ Deno.serve(async (request) => {
         return reply({ error: "Command expired before execution completed." }, 410);
       }
       const safeResult = isRecord(body.result) ? body.result : {};
+      if (command.command_type === "STOP_PROCESS" && body.status === "completed") {
+        const expectedMethod = command.parameters?.force === true ? "forced" : "graceful";
+        if (safeResult.terminated !== true || safeResult.method !== expectedMethod) return reply({ error: "The agent did not confirm that the requested process termination completed." }, 400);
+      }
       if (command.command_type === "GET_PROCESSES") await storeInventory(admin, computerId, "processes", safeResult);
       if (command.command_type === "GET_SERVICES") await storeInventory(admin, computerId, "services", safeResult);
       if (command.command_type === "GET_SOFTWARE") await storeInventory(admin, computerId, "software", safeResult);
@@ -197,8 +215,10 @@ Deno.serve(async (request) => {
       const errorMessage = typeof body.error_message === "string" ? body.error_message.slice(0, 1000) : null;
       const { error: updateError } = await admin.from("commands").update({ status, result: safeResult, error_message: errorMessage, executed_at: new Date().toISOString() }).eq("id", command.id);
       if (updateError) throw updateError;
-      const action = command.command_type;
-      await admin.from("activity_logs").insert({ computer_id: computerId, action, description: `Agent reported ${status} for ${command.command_type}.`, result: status === "completed" ? "success" : status });
+      if (command.command_type !== "STOP_PROCESS") {
+        const action = command.command_type;
+        await admin.from("activity_logs").insert({ computer_id: computerId, action, description: `Agent reported ${status} for ${command.command_type}.`, result: status === "completed" ? "success" : status === "rejected" ? "rejected" : "failure" });
+      }
       return reply({ ok: true });
     }
 

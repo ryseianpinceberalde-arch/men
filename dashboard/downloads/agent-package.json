@@ -1,8 +1,8 @@
 {
-    "sha256":  "dac989a46be5244894ed7c39369e1156044d143d1d973aefc4d339526a72bb9f",
+    "sha256":  "2c1796c9380d414c033d681a0ce6d03670ccd25debbe2eda03e7d188213e4565",
     "parts":  [
-                  "PCMaintenance.Agent-win-x64-dac989a46be5.zip.part001",
-                  "PCMaintenance.Agent-win-x64-dac989a46be5.zip.part002",
-                  "PCMaintenance.Agent-win-x64-dac989a46be5.zip.part003"
+                  "PCMaintenance.Agent-win-x64-2c1796c9380d.zip.part001",
+                  "PCMaintenance.Agent-win-x64-2c1796c9380d.zip.part002",
+                  "PCMaintenance.Agent-win-x64-2c1796c9380d.zip.part003"
               ]
 }

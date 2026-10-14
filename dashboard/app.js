@@ -1,14 +1,37 @@
 import { supabase, configurationError } from "./services/supabase.js";
+import { renderNetwork, disposeNetwork, networkLoadError } from "./components/network.js";
 import { invoke, recordActivity, safeSearch, latestStatusFor, listTechnicians } from "./services/api.js";
 import { escapeHtml, formatBytes, formatDate, formatUptime, statusBadge, heading, emptyState, dataTable, tablePanel, toast, showModal, field, downloadCsv } from "./components/ui.js";
 
 const content = document.querySelector("#page-content");
-const state = { user: null, profile: null, view: "dashboard", detailId: null, detailTab: "overview", realtime: null, chart: null, searchTimer: null, evaluationTimer: null, list: { page: 1, pageSize: 10, search: "", filter: "", sort: "created_at", ascending: false, rows: [] }, lists: {} };
+const state = { user: null, profile: null, view: "dashboard", detailId: null, detailTab: "overview", realtime: null, realtimeTimer: null, chart: null, searchTimer: null, searchRevision: 0, evaluationTimer: null, activationPromise: null, activationUserId: null, activationRevision: 0, refreshing: false, initialViewLoaded: false, lastInteractionAt: 0, dataChanged: false, list: { page: 1, pageSize: 10, search: "", filter: "", sort: "created_at", ascending: false, rows: [] }, lists: {} };
 const roleNames = { administrator: "Administrator", technician: "Technician", viewer: "Viewer" };
 const maintenanceTypes = ["Preventive Maintenance", "Corrective Maintenance", "Hardware Maintenance", "Software Maintenance", "Network Maintenance", "Security Maintenance"];
 const normalizeProcessName = (name) => String(name ?? "").trim().replace(/\.exe$/i, "").toLowerCase();
 const processExecutableName = (name) => /\.exe$/i.test(String(name ?? "")) ? String(name) : `${String(name ?? "")}.exe`;
-const processDenylist = new Set(["system", "system idle process", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe", "svchost.exe"].map(normalizeProcessName));
+const agentFreshnessMs = 120_000;
+function computerStatusLabel(computer) {
+  if (computer.enrollment_status === "revoked") return "Revoked";
+  if (computer.enrollment_status !== "active") return "Pairing pending";
+  if (computer.status === "maintenance") return "Maintenance";
+  const lastSeen = Date.parse(computer.last_seen ?? "");
+  return computer.status === "online" && Number.isFinite(lastSeen) && Date.now() - lastSeen <= agentFreshnessMs ? "Online" : "Offline";
+}
+function endTaskUnavailableLabel(computer) {
+  if (computer.enrollment_status === "revoked") return "Agent pairing revoked";
+  if (computer.enrollment_status !== "active") return "Pair agent first";
+  // Agent liveness is checked by admin-api when the action is submitted. A
+  // dashboard copy of last_seen can be stale even while the agent is polling.
+  return "";
+}
+function processEndTaskUnavailableLabel(computer, process) {
+  const computerUnavailable = endTaskUnavailableLabel(computer);
+  if (computerUnavailable) return computerUnavailable;
+  if (!process.process_started_at) return "Refresh to verify identity";
+  const updatedAt = Date.parse(process.updated_at ?? "");
+  return Number.isFinite(updatedAt) && Date.now() - updatedAt <= agentFreshnessMs ? "" : "Refresh process list";
+}
+const processDenylist = new Set(["system", "system idle process", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe", "winlogon.exe", "svchost.exe", "MsMpEng.exe", "NisSrv.exe", "SecurityHealthService.exe", "Sense.exe", "MsSense.exe", "CSFalconService.exe", "CSFalconContainer.exe", "SentinelAgent.exe", "SentinelService.exe", "SentinelStaticEngine.exe", "SophosFileScanner.exe", "SophosHealth.exe", "SophosNetFilter.exe", "SophosClean.exe", "ekrn.exe", "avp.exe", "bdservicehost.exe", "WRSA.exe", "McShield.exe", "McAfeeFramework.exe", "TmListen.exe", "TmPfw.exe", "NortonSecurity.exe", "ElasticEndpoint.exe", "elastic-agent.exe", "osqueryd.exe"].map(normalizeProcessName));
 const serviceDenylist = new Set(["rpcss", "dcomlaunch", "eventlog", "wininit", "winmgmt", "windefend", "mpssvc", "plugplay", "samss"]);
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: "bi-grid-1x2" },
@@ -16,6 +39,10 @@ const navItems = [
   { id: "computers", label: "Computers", icon: "bi-pc-display-horizontal" },
   { id: "hardware", label: "Hardware Inventory", icon: "bi-cpu" },
   { id: "software", label: "Software Inventory", icon: "bi-box-seam", adminTech: true },
+  { section: "NETWORK", adminTech: true },
+  { id: "network", label: "Network Overview", icon: "bi-diagram-3", adminTech: true },
+  { id: "wifi", label: "Wi-Fi Monitoring", icon: "bi-wifi", adminTech: true },
+  { id: "internet", label: "Internet Monitoring", icon: "bi-globe2", adminTech: true },
   { section: "SERVICE DESK" },
   { id: "maintenance", label: "Maintenance", icon: "bi-wrench-adjustable" },
   { id: "schedules", label: "Maintenance Schedule", icon: "bi-calendar3", adminTech: true },
@@ -52,37 +79,75 @@ function showAuth(message = "") {
 
 async function activateSession(user) {
   if (!user) {
+    disposeNetwork();
+    state.activationRevision += 1;
+    state.activationPromise = null;
+    state.activationUserId = null;
     state.user = null;
     state.profile = null;
+    state.initialViewLoaded = false;
+    content.innerHTML = "";
     state.realtime?.unsubscribe();
     state.realtime = null;
+    clearTimeout(state.realtimeTimer);
+    state.realtimeTimer = null;
     clearInterval(state.evaluationTimer);
     state.evaluationTimer = null;
     if (state.chart) { state.chart.destroy(); state.chart = null; }
     showAuth();
     return;
   }
-  state.user = user;
-  const { data, error } = await supabase.from("profiles").select("id, full_name, role, status").eq("id", user.id).maybeSingle();
-  if (error) { showAuth(`Unable to load your user profile: ${error.message}`); return; }
-  if (!data || data.status !== "active") {
-    await supabase.auth.signOut();
-    showAuth("This account is not active. Contact an administrator.");
+  if (state.user?.id === user.id && state.profile) {
+    state.user = user;
     return;
   }
-  state.profile = data;
-  document.querySelector("#auth-screen").classList.add("d-none");
-  document.querySelector("#app-screen").classList.remove("d-none");
-  document.querySelector("#user-name").textContent = data.full_name || user.email || "User";
-  document.querySelector("#user-role").textContent = roleNames[data.role] ?? "Viewer";
-  document.querySelector("#user-avatar").textContent = (data.full_name || user.email || "U").trim().charAt(0).toUpperCase();
-  renderNav();
-  listenRealtime();
-  if (data.role === "administrator") {
-    void invoke("evaluate-alerts").catch(() => {});
-    state.evaluationTimer = setInterval(() => void invoke("evaluate-alerts").catch(() => {}), 60_000);
+  if (state.activationUserId === user.id && state.activationPromise) return state.activationPromise;
+  if (state.user && state.user.id !== user.id) {
+    disposeNetwork();
+    state.realtime?.unsubscribe();
+    state.realtime = null;
+    clearTimeout(state.realtimeTimer);
+    state.realtimeTimer = null;
+    clearInterval(state.evaluationTimer);
+    state.evaluationTimer = null;
+    state.profile = null;
+    state.initialViewLoaded = false;
+    content.innerHTML = "";
   }
-  await navigate(readHashView());
+  state.user = user;
+  const revision = ++state.activationRevision;
+  state.activationUserId = user.id;
+  const activation = (async () => {
+    const { data, error } = await supabase.from("profiles").select("id, full_name, role, status").eq("id", user.id).maybeSingle();
+    if (revision !== state.activationRevision || state.user?.id !== user.id) return;
+    if (error) { showAuth(`Unable to load your user profile: ${error.message}`); return; }
+    if (!data || data.status !== "active") {
+      await supabase.auth.signOut();
+      showAuth("This account is not active. Contact an administrator.");
+      return;
+    }
+    state.profile = data;
+    document.querySelector("#auth-screen").classList.add("d-none");
+    document.querySelector("#app-screen").classList.remove("d-none");
+    document.querySelector("#user-name").textContent = data.full_name || user.email || "User";
+    document.querySelector("#user-role").textContent = roleNames[data.role] ?? "Viewer";
+    document.querySelector("#user-avatar").textContent = (data.full_name || user.email || "U").trim().charAt(0).toUpperCase();
+    renderNav();
+    listenRealtime();
+    if (data.role === "administrator") {
+      void invoke("evaluate-alerts").catch(() => {});
+      if (!state.evaluationTimer) state.evaluationTimer = setInterval(() => void invoke("evaluate-alerts").catch(() => {}), 60_000);
+    }
+    await navigate(readHashView());
+  })();
+  state.activationPromise = activation;
+  try { await activation; }
+  finally {
+    if (state.activationPromise === activation) {
+      state.activationPromise = null;
+      state.activationUserId = null;
+    }
+  }
 }
 
 function readHashView() {
@@ -98,13 +163,15 @@ function readHashView() {
   return valid.includes(requested) ? requested : "dashboard";
 }
 
-async function navigate(view, { push = true } = {}) {
+async function navigate(view, { push = true, loading = true } = {}) {
   const isAdmin = state.profile?.role === "administrator";
   const isTech = state.profile?.role === "technician";
   if (view === "logout") return logout();
   if (state.profile?.role === "viewer" && ["software", "schedules", "problems", "alerts", "activity", "reports", "users", "settings"].includes(view)) view = "dashboard";
   if (["users", "settings", "activity"].includes(view) && !isAdmin) view = "dashboard";
   if (["alerts", "reports"].includes(view) && !isAdmin && !isTech) view = "dashboard";
+  if (["network", "wifi", "internet"].includes(view) && !isAdmin && !isTech) view = "dashboard";
+  if (view !== state.view) disposeNetwork();
   state.view = view;
   renderNav();
   if (push) {
@@ -116,9 +183,15 @@ async function navigate(view, { push = true } = {}) {
   document.querySelector("#sidebar").classList.remove("open");
   document.querySelector(".mobile-shade")?.classList.remove("show");
   if (state.chart) { state.chart.destroy(); state.chart = null; }
-  content.innerHTML = `<section class="panel"><div class="skeleton" style="width:180px"></div><div class="skeleton mt-3" style="height:130px"></div></section>`;
+  if (loading && !state.initialViewLoaded) content.innerHTML = `<section class="panel"><div class="skeleton" style="width:180px"></div><div class="skeleton mt-3" style="height:130px"></div></section>`;
+  await renderCurrentView(view);
+}
+
+async function renderCurrentView(view, { throwOnError = false } = {}) {
+  const label = view === "computer-detail" ? "Computer details" : navItems.find((item) => item.id === view)?.label ?? "Dashboard";
   try {
     if (view === "dashboard") await renderDashboard();
+    else if (["network", "wifi", "internet"].includes(view)) await renderNetwork(content, view, state.profile);
     else if (view === "computers") await renderComputers();
     else if (view === "computer-detail") await renderComputerDetail();
     else if (view === "users") await renderUsers();
@@ -127,8 +200,15 @@ async function navigate(view, { push = true } = {}) {
     else if (view === "hardware") await renderHardware();
     else if (recordConfigs[view]) await renderRecords(view);
     else await renderDashboard();
+    state.initialViewLoaded = true;
+    updateLastRefreshTime();
   } catch (error) {
-    content.innerHTML = `${heading(label, "We could not load this view.")}<div class="error-block">${escapeHtml(error.message || "Please try again.")}</div><button class="btn btn-outline-secondary mt-3" data-action="refresh">Try again</button>`;
+    if (throwOnError) throw error;
+    const networkView = ["network", "wifi", "internet"].includes(view);
+    if (networkView) disposeNetwork();
+    state.initialViewLoaded = true;
+    const message = networkView ? networkLoadError(error) : error.message || "Please try again.";
+    content.innerHTML = `${heading(label, networkView && error.code === "PGRST205" ? "Network monitoring has not been enabled for this project yet." : "We could not load this view.")}<div class="error-block">${escapeHtml(message)}</div><button class="btn btn-outline-secondary mt-3" data-action="refresh">Try again</button>`;
   }
 }
 
@@ -139,20 +219,205 @@ async function logout() {
 
 function listenRealtime() {
   if (state.realtime) return;
-  const watched = ["computers", "computer_status", "alerts", "commands", "maintenance_records", "maintenance_schedules"];
-  let timer;
-  let builder = supabase.channel(`dashboard-${state.user.id}`);
-  for (const table of watched) builder = builder.on("postgres_changes", { event: "*", schema: "public", table }, () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      if (state.view === "dashboard" || state.view === "computers" || state.view === "computer-detail" || ["alerts", "maintenance", "schedules"].includes(state.view)) void navigate(state.view, { push: false });
-    }, 500);
-  });
-  state.realtime = builder.subscribe((status) => {
+  const watched = ["computers", "computer_status", "computer_specs", "network_state", "installed_software", "processes", "services", "alerts", "commands", "maintenance_records", "maintenance_schedules", "problems", "activity_logs", "computer_assignments"];
+  const pendingChanges = [];
+  let channel = supabase.channel(`dashboard-${state.user.id}`);
+  for (const table of watched) {
+    channel = channel.on("postgres_changes", { event: "*", schema: "public", table }, (payload) => {
+      pendingChanges.push({ table, payload });
+      clearTimeout(state.realtimeTimer);
+      state.realtimeTimer = setTimeout(() => {
+        state.realtimeTimer = null;
+        const changes = pendingChanges.splice(0);
+        onRealtimeChanges(changes);
+      }, 700);
+    });
+  }
+  state.realtime = channel.subscribe((status) => {
     const label = document.querySelector(".connection-status span:last-child");
-    if (label && status === "SUBSCRIBED") label.textContent = "Supabase connected";
-    if (label && status === "CHANNEL_ERROR") label.textContent = "Connection interrupted";
+    if (label && status === "SUBSCRIBED") label.textContent = "Live updates connected";
+    if (label && ["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) label.textContent = "Live updates interrupted";
   });
+}
+
+function onRealtimeChanges(changes) {
+  if (!changes.length) return;
+  markRefreshPending();
+  if (changes.some(({ table }) => table === "alerts")) void refreshNotificationDot();
+  const liveComputerIds = [...new Set(changes.flatMap(({ table, payload }) => {
+    if (!new Set(["computers", "computer_status"]).has(table)) return [];
+    const row = payload.new && Object.keys(payload.new).length ? payload.new : payload.old;
+    const id = table === "computers" ? row?.id : row?.computer_id;
+    return id ? [id] : [];
+  }))];
+  if (liveComputerIds.length) void refreshVisibleComputerStatus(liveComputerIds).catch(() => {});
+  if (state.view === "dashboard" && changes.some(({ table }) => table === "computer_status")) {
+    void refreshFleetMonitoring().catch(() => {});
+  }
+  if (state.view !== "computer-detail" || !canRefreshDetailNow()) return;
+  const detailChanged = changes.some(({ table, payload }) => {
+    const row = payload.new && Object.keys(payload.new).length ? payload.new : payload.old;
+    const computerId = table === "computers" ? row?.id : row?.computer_id;
+    return computerId === state.detailId && detailTableAffectsTab(table, state.detailTab);
+  });
+  if (detailChanged) {
+    void refreshComputerDetailPanel(state.searchRevision, state.detailId, state.detailTab)
+      .then((updated) => { if (updated) clearRefreshPending(); })
+      .catch(() => markRefreshPending());
+  }
+}
+
+async function refreshVisibleComputerStatus(computerIds) {
+  const visibleIds = computerIds.filter((id) => content.querySelector(`[data-live-status-for="${CSS.escape(id)}"], [data-live-metrics-for="${CSS.escape(id)}"]`));
+  if (!visibleIds.length) return;
+  const [{ data: computers, error: computerError }, latest] = await Promise.all([
+    supabase.from("computers").select("id, status, enrollment_status, last_seen").in("id", visibleIds),
+    latestStatusFor(visibleIds),
+  ]);
+  if (computerError) throw computerError;
+  for (const computer of computers ?? []) {
+    const status = content.querySelector(`[data-live-status-for="${CSS.escape(computer.id)}"]`);
+    if (status) status.innerHTML = statusBadge(computerStatusLabel(computer));
+    const lastSeen = content.querySelector(`[data-live-last-seen-for="${CSS.escape(computer.id)}"]`);
+    if (lastSeen) lastSeen.textContent = relativeTime(computer.last_seen);
+    const sample = latest.get(computer.id);
+    const metrics = content.querySelector(`[data-live-metrics-for="${CSS.escape(computer.id)}"]`);
+    if (sample && metrics) metrics.textContent = `${Number(sample.cpu_usage).toFixed(0)}% / ${Number(sample.ram_usage).toFixed(0)}%`;
+  }
+}
+
+async function refreshFleetMonitoring() {
+  const canvas = document.querySelector("#fleet-chart");
+  if (!canvas || state.view !== "dashboard") return;
+  const threshold = new Date(Date.now() - 5 * 60_000).toISOString();
+  const { data, error } = await supabase.from("computer_status").select("computer_id, cpu_usage, ram_usage, recorded_at").gte("recorded_at", threshold).order("recorded_at", { ascending: false }).limit(500);
+  if (error) throw error;
+  if (canvas.isConnected && state.view === "dashboard") drawFleetChart(data ?? [], []);
+}
+
+function detailTableAffectsTab(table, tab) {
+  const tablesByTab = {
+    overview: ["computers", "computer_specs", "computer_status", "computer_assignments"],
+    hardware: ["computers", "computer_specs"],
+    monitoring: ["computers", "computer_status", "network_state"],
+    software: ["installed_software"],
+    applications: ["processes"],
+    processes: ["processes"],
+    services: ["services"],
+    maintenance: ["maintenance_records"],
+    troubleshooting: ["problems"],
+    activity: ["activity_logs"],
+    commands: ["commands"],
+  };
+  return (tablesByTab[tab] ?? []).includes(table);
+}
+
+function canRefreshDetailNow() {
+  if (Date.now() - state.lastInteractionAt < 1500) return false;
+  if (document.querySelector("#modal-root .modal.show")) return false;
+  const focused = document.activeElement;
+  return !focused || !content.contains(focused) || !focused.matches("input, select, textarea, [contenteditable='true'], button, a");
+}
+
+function markRefreshPending() {
+  state.dataChanged = true;
+  document.querySelector("#refresh-data")?.classList.add("has-updates");
+}
+
+function clearRefreshPending() {
+  state.dataChanged = false;
+  document.querySelector("#refresh-data")?.classList.remove("has-updates");
+}
+
+async function refreshNotificationDot() {
+  const { count, error } = await supabase.from("alerts").select("id", { count: "exact", head: true }).in("status", ["Open", "Acknowledged"]);
+  if (error) return;
+  document.querySelector("#notification-dot")?.classList.toggle("d-none", !count);
+}
+
+function viewControlKey(control, index) {
+  return control.id ? `id:${control.id}` : control.dataset.searchKey ? `search:${control.dataset.searchKey}` : control.name ? `name:${control.name}` : `control:${index}`;
+}
+
+function captureViewState() {
+  const controls = [...content.querySelectorAll("input, select, textarea")];
+  const activeControl = controls.includes(document.activeElement) ? document.activeElement : null;
+  const occurrence = new Map();
+  const values = controls.map((control, index) => {
+    const baseKey = viewControlKey(control, index);
+    const count = occurrence.get(baseKey) ?? 0;
+    occurrence.set(baseKey, count + 1);
+    return {
+      key: `${baseKey}:${count}`,
+      value: control.value,
+      checked: "checked" in control ? control.checked : undefined,
+      selectionStart: typeof control.selectionStart === "number" ? control.selectionStart : null,
+      selectionEnd: typeof control.selectionEnd === "number" ? control.selectionEnd : null,
+      focused: control === activeControl,
+    };
+  });
+  return { values, scrollY: window.scrollY };
+}
+
+function restoreViewState(snapshot) {
+  const controls = [...content.querySelectorAll("input, select, textarea")];
+  const occurrence = new Map();
+  const keyedControls = controls.map((control, index) => {
+    const baseKey = viewControlKey(control, index);
+    const count = occurrence.get(baseKey) ?? 0;
+    occurrence.set(baseKey, count + 1);
+    return [`${baseKey}:${count}`, control];
+  });
+  const byKey = new Map(keyedControls);
+  let focusedControl = null;
+  for (const saved of snapshot.values) {
+    const control = byKey.get(saved.key);
+    if (!control) continue;
+    control.value = saved.value;
+    if (saved.checked !== undefined) control.checked = saved.checked;
+    if (saved.focused) focusedControl = control;
+  }
+  if (focusedControl) {
+    focusedControl.focus({ preventScroll: true });
+    const focusedState = snapshot.values.find((item) => item.focused);
+    if (focusedState?.selectionStart !== null && focusedState?.selectionEnd !== null) focusedControl.setSelectionRange(focusedState.selectionStart, focusedState.selectionEnd);
+  }
+  window.scrollTo({ top: snapshot.scrollY, behavior: "auto" });
+}
+
+function updateLastRefreshTime(date = new Date()) {
+  const label = document.querySelector("#refresh-last-updated");
+  if (!label) return;
+  label.textContent = `Updated ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  const button = document.querySelector("#refresh-data");
+  if (button) button.title = `Last successful refresh: ${date.toLocaleString()}`;
+}
+
+async function refreshCurrentView() {
+  if (state.refreshing) return;
+  state.refreshing = true;
+  const button = document.querySelector("#refresh-data");
+  const snapshot = captureViewState();
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span><span>Refreshing</span>';
+  }
+  try {
+    await renderCurrentView(state.view, { throwOnError: true });
+    restoreViewState(snapshot);
+    clearRefreshPending();
+    updateLastRefreshTime();
+    toast("Data refreshed.");
+  } catch (error) {
+    restoreViewState(snapshot);
+    toast(error.message || "Data could not be refreshed.", "danger");
+  } finally {
+    state.refreshing = false;
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i><span>Refresh Data</span>';
+    }
+  }
 }
 
 async function renderDashboard() {
@@ -206,8 +471,8 @@ async function renderDashboard() {
   const computerColumns = [
     { label: "COMPUTER", render: (row) => `<div class="computer-name"><span class="computer-icon"><i class="bi bi-pc-display"></i></span><span><button class="table-link" data-action="open-computer" data-id="${escapeHtml(row.id)}">${escapeHtml(row.computer_name)}</button><small>${escapeHtml(row.device_id)}</small></span></div>` },
     { label: "OPERATING SYSTEM", render: (row) => escapeHtml(row.os_name || "Pending agent connection") },
-    { label: "STATUS", render: (row) => statusBadge(row.status === "online" && row.enrollment_status === "active" ? "Online" : row.enrollment_status === "revoked" ? "Revoked" : row.status) },
-    { label: "LAST SEEN", render: (row) => escapeHtml(relativeTime(row.last_seen)) },
+    { label: "STATUS", render: (row) => `<span data-live-status-for="${escapeHtml(row.id)}">${statusBadge(computerStatusLabel(row))}</span>` },
+    { label: "LAST SEEN", render: (row) => `<span data-live-last-seen-for="${escapeHtml(row.id)}">${escapeHtml(relativeTime(row.last_seen))}</span>` },
   ];
   const maintenanceRows = (maintenance ?? []).map((row) => ({ ...row, computer: relationName(row.computers) }));
   const health = `<section class="panel"><div class="panel-title"><div><h3>System health</h3><p>Current fleet averages</p></div><i class="bi bi-activity text-primary"></i></div><div class="health-list">${healthMetric("CPU usage", averageCpu, "Across reporting computers", "progress-blue")}${healthMetric("Memory usage", averageRam, "Across reporting computers", "progress-green")}${healthMetric("Disk capacity", averageDisk, "Average storage in use", "progress-amber")}${!isViewer ? healthMetric("Open alerts", alerts.length, "Requires attention", alerts.some((item) => item.severity === "Critical") ? "progress-red" : "progress-amber", 100) : ""}</div></section>`;
@@ -234,6 +499,7 @@ function healthMetric(label, value, caption, barClass, fixedPercent = null) {
 function drawFleetChart(statuses, computers) {
   const canvas = document.querySelector("#fleet-chart");
   if (!canvas || !window.Chart) return;
+  if (state.chart && state.chart.canvas !== canvas) { state.chart.destroy(); state.chart = null; }
   const latest = new Map();
   for (const row of [...statuses].sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at))) {
     const bucket = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(row.recorded_at));
@@ -244,7 +510,13 @@ function drawFleetChart(statuses, computers) {
   const labels = [...latest.keys()].slice(-12);
   const cpu = labels.map((label) => mean(latest.get(label).cpu));
   const ram = labels.map((label) => mean(latest.get(label).ram));
-  state.chart = new Chart(canvas, { type: "line", data: { labels: labels.length ? labels : ["Waiting for agent samples"], datasets: [{ label: "CPU", data: cpu.length ? cpu : [0], borderColor: "#4a7df2", backgroundColor: "#4a7df21a", pointRadius: 2.5, pointBackgroundColor: "#4a7df2", borderWidth: 2, fill: true, tension: .4 }, { label: "Memory", data: ram.length ? ram : [0], borderColor: "#32b58a", backgroundColor: "transparent", pointRadius: 2.5, pointBackgroundColor: "#32b58a", borderWidth: 2, tension: .4 }] }, options: { maintainAspectRatio: false, interaction: { intersect: false, mode: "index" }, plugins: { legend: { position: "bottom", align: "start", labels: { usePointStyle: true, boxWidth: 7, boxHeight: 7, padding: 18, color: "#80909b", font: { family: "DM Sans", size: 10 } } }, tooltip: { callbacks: { label: (context) => `${context.dataset.label}: ${Number(context.raw).toFixed(0)}%` } } }, scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: "#9ba7af", font: { size: 9 }, maxTicksLimit: 7 } }, y: { beginAtZero: true, suggestedMax: 100, max: 100, border: { display: false }, grid: { color: "#edf1f4" }, ticks: { color: "#9ba7af", font: { size: 9 }, callback: (value) => `${value}%`, maxTicksLimit: 5 } } } } });
+  const chartData = { labels: labels.length ? labels : ["Waiting for agent samples"], datasets: [{ label: "CPU", data: cpu.length ? cpu : [0], borderColor: "#4a7df2", backgroundColor: "#4a7df21a", pointRadius: 2.5, pointBackgroundColor: "#4a7df2", borderWidth: 2, fill: true, tension: .4 }, { label: "Memory", data: ram.length ? ram : [0], borderColor: "#32b58a", backgroundColor: "transparent", pointRadius: 2.5, pointBackgroundColor: "#32b58a", borderWidth: 2, tension: .4 }] };
+  if (state.chart?.canvas === canvas) {
+    state.chart.data = chartData;
+    state.chart.update("none");
+    return;
+  }
+  state.chart = new Chart(canvas, { type: "line", data: chartData, options: { maintainAspectRatio: false, interaction: { intersect: false, mode: "index" }, plugins: { legend: { position: "bottom", align: "start", labels: { usePointStyle: true, boxWidth: 7, boxHeight: 7, padding: 18, color: "#80909b", font: { family: "DM Sans", size: 10 } } }, tooltip: { callbacks: { label: (context) => `${context.dataset.label}: ${Number(context.raw).toFixed(0)}%` } } }, scales: { x: { grid: { display: false }, border: { display: false }, ticks: { color: "#9ba7af", font: { size: 9 }, maxTicksLimit: 7 } }, y: { beginAtZero: true, suggestedMax: 100, max: 100, border: { display: false }, grid: { color: "#edf1f4" }, ticks: { color: "#9ba7af", font: { size: 9 }, callback: (value) => `${value}%`, maxTicksLimit: 5 } } } } });
 }
 
 const mean = (values) => values.length ? values.reduce((sum, item) => sum + item, 0) / values.length : 0;
@@ -281,9 +553,9 @@ async function renderComputers() {
     { label: "ASSIGNED USER", key: "assigned_user", sort: "assigned_user" },
     { label: "OPERATING SYSTEM", render: (row) => escapeHtml(row.os_name || "—") },
     { label: "IP ADDRESS", render: (row) => escapeHtml(row.ip_address || "—") },
-    { label: "STATUS", sort: "status", render: (row) => statusBadge(row.enrollment_status === "revoked" ? "Revoked" : row.status) },
-    { label: "CPU / RAM", render: (row) => { const sample = latest.get(row.id); return sample ? `${Number(sample.cpu_usage).toFixed(0)}% / ${Number(sample.ram_usage).toFixed(0)}%` : "—"; } },
-    { label: "LAST SEEN", sort: "last_seen", render: (row) => escapeHtml(relativeTime(row.last_seen)) },
+    { label: "STATUS", sort: "status", render: (row) => `<span data-live-status-for="${escapeHtml(row.id)}">${statusBadge(computerStatusLabel(row))}</span>` },
+    { label: "CPU / RAM", render: (row) => { const sample = latest.get(row.id); return `<span data-live-metrics-for="${escapeHtml(row.id)}">${sample ? `${Number(sample.cpu_usage).toFixed(0)}% / ${Number(sample.ram_usage).toFixed(0)}%` : "—"}</span>`; } },
+    { label: "LAST SEEN", sort: "last_seen", render: (row) => `<span data-live-last-seen-for="${escapeHtml(row.id)}">${escapeHtml(relativeTime(row.last_seen))}</span>` },
   ];
   const actions = `${state.profile.role === "administrator" ? '<button class="btn btn-primary" data-action="add-computer"><i class="bi bi-plus-lg me-1"></i><span class="btn-label">Add computer</span></button>' : ""}<button class="btn btn-outline-secondary" data-action="export-computers"><i class="bi bi-download me-1"></i><span class="btn-label">Export CSV</span></button>`;
   content.innerHTML = `${heading("Computers", "View the computers reporting to your organization.", actions, "FLEET / DEVICE MANAGEMENT")}${tablePanel({ columns, rows, search: list.search, placeholder: "Search name, device ID, or user...", filters, page: list.page, pageSize: list.pageSize, count: list.count, emptyTitle: "No computers found", emptyText: list.search || list.filter ? "Try changing your search or status filter." : "Register an authorized Windows computer to get started.", icon: "bi-pc-display-horizontal" })}`;
@@ -352,7 +624,7 @@ async function openComputer(id) {
   await navigate("computer-detail");
 }
 
-const detailTabs = ["Overview", "Hardware", "Monitoring", "Software", "Processes", "Services", "Maintenance", "Troubleshooting", "Activity", "Commands"];
+const detailTabs = ["Overview", "Hardware", "Monitoring", "Software", "Applications", "Processes", "Services", "Maintenance", "Troubleshooting", "Activity", "Commands"];
 async function renderComputerDetail() {
   if (!state.detailId) return navigate("computers", { push: false });
   const { data: computer, error } = await supabase.from("computers").select("*").eq("id", state.detailId).maybeSingle();
@@ -374,28 +646,46 @@ async function renderComputerDetail() {
     technicianNames = (technicians ?? []).map((technician) => technician.full_name || technician.id);
   }
   const canManage = state.profile.role === "administrator" || state.profile.role === "technician";
-  const online = computer.status === "online" && computer.enrollment_status === "active";
-  const actions = `${canManage ? '<button class="btn btn-outline-light" data-action="request-system-info"><i class="bi bi-arrow-repeat me-1"></i>Refresh inventory</button>' : ""}${state.profile.role === "administrator" ? (computer.enrollment_status === "active" ? '<button class="btn btn-outline-light" data-action="revoke-agent"><i class="bi bi-shield-x me-1"></i>Revoke agent</button>' : '<button class="btn btn-light" data-action="pair-agent"><i class="bi bi-link-45deg me-1"></i>Pair agent</button>') : ""}`;
+  const computerStatus = computerStatusLabel(computer);
+  const actions = `${canManage ? '<button class="btn btn-outline-light" data-action="request-system-info"><i class="bi bi-arrow-repeat me-1"></i>Refresh inventory</button>' : ""}${state.profile.role === "administrator" ? `${computer.enrollment_status === "active" ? '<button class="btn btn-light" data-action="pair-agent"><i class="bi bi-arrow-repeat me-1"></i>Re-pair agent</button><button class="btn btn-outline-light" data-action="revoke-agent"><i class="bi bi-shield-x me-1"></i>Revoke agent</button>' : '<button class="btn btn-light" data-action="pair-agent"><i class="bi bi-link-45deg me-1"></i>Pair agent</button>'}` : ""}`;
   const allowedTabs = state.profile.role === "viewer" ? ["Overview", "Hardware", "Monitoring", "Maintenance"] : detailTabs;
   if (!allowedTabs.some((tab) => tab.toLowerCase().replaceAll(" ", "-") === state.detailTab)) state.detailTab = "overview";
   const tabs = allowedTabs.map((tab) => {
     const id = tab.toLowerCase().replaceAll(" ", "-");
     return `<button class="detail-tab ${state.detailTab === id ? "active" : ""}" data-action="detail-tab" data-tab="${id}">${escapeHtml(tab)}</button>`;
   }).join("");
-  let panel = "";
-  if (state.detailTab === "overview") panel = overviewPanel(computer, specs, latest, technicianNames);
-  else if (state.detailTab === "hardware") panel = hardwarePanel(computer, specs);
-  else if (state.detailTab === "monitoring") panel = await monitoringPanel(computer);
-  else if (state.detailTab === "software") panel = await softwarePanel(computer, canManage);
-  else if (state.detailTab === "processes") panel = await processesPanel(computer, canManage);
-  else if (state.detailTab === "services") panel = await servicesPanel(computer, canManage);
-  else if (state.detailTab === "maintenance") panel = await maintenanceDetail(computer, canManage);
-  else if (state.detailTab === "troubleshooting") panel = await problemsDetail(computer, canManage);
-  else if (state.detailTab === "activity") panel = await activityDetail(computer);
-  else if (state.detailTab === "commands") panel = await commandsDetail(computer);
-  else panel = overviewPanel(computer, specs, latest, technicianNames);
-  content.innerHTML = `${heading("Computer details", "Asset profile, monitoring, and approved maintenance actions.", `<button class="btn btn-outline-secondary" data-view="computers"><i class="bi bi-arrow-left me-1"></i>Back to fleet</button>`, "FLEET / ASSET PROFILE")}<section class="detail-hero"><span class="detail-hero-icon"><i class="bi bi-pc-display-horizontal"></i></span><div><h2>${escapeHtml(computer.computer_name)}</h2><p>${escapeHtml(computer.device_id)} <span class="mx-1">·</span> ${escapeHtml(computer.os_name || "Windows agent not yet connected")} <span class="mx-1">·</span> Last seen ${escapeHtml(relativeTime(computer.last_seen))}</p></div><div class="ms-2">${statusBadge(online ? "Online" : computer.enrollment_status === "revoked" ? "Revoked" : computer.status)}</div><div class="hero-actions">${actions}</div></section><nav class="detail-tabs" aria-label="Computer information">${tabs}</nav><div id="detail-panel">${panel}</div>`;
+  const panel = await computerDetailPanel(computer, canManage, { specs, latest, technicianNames });
+  content.innerHTML = `${heading("Computer details", "Asset profile, monitoring, and approved maintenance actions.", `<button class="btn btn-outline-secondary" data-view="computers"><i class="bi bi-arrow-left me-1"></i>Back to fleet</button>`, "FLEET / ASSET PROFILE")}<section class="detail-hero"><span class="detail-hero-icon"><i class="bi bi-pc-display-horizontal"></i></span><div><h2>${escapeHtml(computer.computer_name)}</h2><p>${escapeHtml(computer.device_id)} <span class="mx-1">·</span> ${escapeHtml(computer.os_name || "Windows agent not yet connected")} <span class="mx-1">·</span> Last seen ${escapeHtml(relativeTime(computer.last_seen))}</p></div><div class="ms-2">${statusBadge(computerStatus)}</div><div class="hero-actions">${actions}</div></section><nav class="detail-tabs" aria-label="Computer information">${tabs}</nav><div id="detail-panel">${panel}</div>`;
   if (state.detailTab === "monitoring") drawMonitoringChart(state.monitorRows ?? []);
+}
+
+async function computerDetailPanel(computer, canManage, { specs = null, latest = null, technicianNames = [] } = {}) {
+  if (state.detailTab === "overview") return overviewPanel(computer, specs, latest, technicianNames);
+  if (state.detailTab === "hardware") return hardwarePanel(computer, specs);
+  if (state.detailTab === "monitoring") return monitoringPanel(computer);
+  if (state.detailTab === "software") return softwarePanel(computer, canManage);
+  if (state.detailTab === "applications") return applicationsPanel(computer, canManage);
+  if (state.detailTab === "processes") return processesPanel(computer, canManage);
+  if (state.detailTab === "services") return servicesPanel(computer, canManage);
+  if (state.detailTab === "maintenance") return maintenanceDetail(computer, canManage);
+  if (state.detailTab === "troubleshooting") return problemsDetail(computer, canManage);
+  if (state.detailTab === "activity") return activityDetail(computer);
+  if (state.detailTab === "commands") return commandsDetail(computer);
+  return overviewPanel(computer, specs, latest, technicianNames);
+}
+
+async function refreshComputerDetailPanel(searchRevision, detailId, detailTab) {
+  const panelElement = document.querySelector("#detail-panel");
+  if (!panelElement || !detailId || state.view !== "computer-detail") return false;
+  const { data: computer, error } = await supabase.from("computers").select("*").eq("id", detailId).maybeSingle();
+  if (error) throw error;
+  if (!computer || searchRevision !== state.searchRevision || state.detailId !== detailId || state.detailTab !== detailTab) return false;
+  const canManage = state.profile.role === "administrator" || state.profile.role === "technician";
+  const panel = await computerDetailPanel(computer, canManage);
+  if (searchRevision !== state.searchRevision || state.detailId !== detailId || state.detailTab !== detailTab) return false;
+  panelElement.innerHTML = panel;
+  if (detailTab === "monitoring") drawMonitoringChart(state.monitorRows ?? []);
+  return true;
 }
 
 function overviewPanel(computer, specs, latest, technicianNames = []) {
@@ -422,17 +712,49 @@ function hardwarePanel(computer, specs) {
 }
 
 async function monitoringPanel(computer) {
-  const { data, error } = await supabase.from("computer_status").select("cpu_usage, ram_usage, disk_usage, uptime, recorded_at").eq("computer_id", computer.id).order("recorded_at", { ascending: false }).limit(60);
-  if (error) throw error;
-  const rows = data ?? [];
+  const canViewNetwork = ["administrator", "technician"].includes(state.profile.role);
+  const [statusResult, networkResult] = await Promise.all([
+    supabase.from("computer_status").select("cpu_usage, ram_usage, disk_usage, uptime, recorded_at").eq("computer_id", computer.id).order("recorded_at", { ascending: false }).limit(60),
+    canViewNetwork
+      ? supabase.from("network_state").select("observed_at, adapters").eq("computer_id", computer.id).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+  if (statusResult.error) throw statusResult.error;
+  if (networkResult.error) throw networkResult.error;
+  const rows = statusResult.data ?? [];
   state.monitorRows = rows;
   const latest = rows[0];
-  return `${latest ? `<div class="stat-grid">${healthMetric("CPU usage", Number(latest.cpu_usage), "Latest report", "progress-blue")}${healthMetric("Memory usage", Number(latest.ram_usage), "Latest report", "progress-green")}${healthMetric("Disk usage", Number(latest.disk_usage), "Latest report", "progress-amber")}${healthMetric("System uptime", formatUptime(latest.uptime), `Updated ${relativeTime(latest.recorded_at)}`, "progress-blue", 0)}</div>` : ""}<section class="panel mt-3"><div class="panel-title"><div><h3>Recent health samples</h3><p>Sampling is limited to one historical record every five minutes.</p></div><span class="small text-secondary">${rows.length} samples</span></div>${rows.length ? '<div class="chart-box"><canvas id="monitoring-chart" aria-label="Computer system monitoring"></canvas></div>' : emptyState("bi-activity", "No monitoring data yet", "The agent sends a status heartbeat approximately every 45 seconds.")}</section>`;
+  const networkState = networkResult.data;
+  const wifiAdapters = Array.isArray(networkState?.adapters) ? networkState.adapters.filter(adapter => adapter.type === "wifi") : [];
+  const wifiContent = !canViewNetwork
+    ? emptyState("bi-shield-lock", "Wi-Fi readings are restricted", "An administrator or technician can view this computer’s network readings.")
+    : !networkState
+      ? emptyState("bi-wifi", "No Wi-Fi readings yet", "Pair the updated agent on this computer and make sure its Windows service is running. Readings appear after the agent reports.")
+      : wifiAdapters.length === 0
+        ? emptyState("bi-wifi-off", "No wireless adapter was reported", "The latest network sample did not include a supported Wi-Fi adapter.")
+        : `<div class="vstack gap-2">${wifiAdapters.map(adapter => {
+          const wifi = adapter.wifi ?? {};
+          const values = [
+            ["Wi-Fi status", wifi.status], ["Connected network", wifi.ssid],
+            ["Signal strength", wifi.signal_percent == null ? null : `${wifi.signal_percent}%`],
+            ["Radio type", wifi.radio_type], ["Frequency band", wifi.band], ["Channel", wifi.channel],
+            ["Receive / transmit link", wifi.receive_link_mbps == null && wifi.transmit_link_mbps == null ? null : `${wifi.receive_link_mbps ?? "Unavailable"} / ${wifi.transmit_link_mbps ?? "Unavailable"} Mbps`],
+            ["IPv4", adapter.ipv4?.join(", ")], ["IPv6", adapter.ipv6?.join(", ")],
+            ["Default gateway", adapter.gateways?.join(", ")], ["DNS servers", adapter.dns_servers?.join(", ")],
+            ["DHCP", adapter.dhcp_enabled == null ? null : adapter.dhcp_enabled ? "Enabled" : "Disabled"],
+            ["Collection note", wifi.limitation],
+          ];
+          const display = value => value == null || value === "" ? "Unavailable" : String(value);
+          return `<article class="network-adapter"><h4>${escapeHtml(adapter.name || "Wireless adapter")} <small class="text-secondary">· ${escapeHtml(wifi.status || "Unknown status")}</small></h4><dl class="network-details">${values.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(display(value))}</dd></div>`).join("")}</dl></article>`;
+        }).join("")}</div><p class="small text-secondary mt-2">Last Wi-Fi observation: ${escapeHtml(formatDate(networkState.observed_at, true))}. Values are shown only when the agent reports them.</p>`;
+  return `${latest ? `<div class="stat-grid">${healthMetric("CPU usage", Number(latest.cpu_usage), "Latest report", "progress-blue")}${healthMetric("Memory usage", Number(latest.ram_usage), "Latest report", "progress-green")}${healthMetric("Disk usage", Number(latest.disk_usage), "Latest report", "progress-amber")}${healthMetric("System uptime", formatUptime(latest.uptime), `Updated ${relativeTime(latest.recorded_at)}`, "progress-blue", 0)}</div>` : ""}<section class="panel mt-3"><div class="panel-title"><div><h3>Recent health samples</h3><p>Sampling is limited to one historical record every five minutes.</p></div><span class="small text-secondary">${rows.length} samples</span></div>${rows.length ? '<div class="chart-box"><canvas id="monitoring-chart" aria-label="Computer system monitoring"></canvas></div>' : emptyState("bi-activity", "No monitoring data yet", "The agent sends a status heartbeat approximately every 45 seconds.")}</section><section class="panel mt-3"><div class="panel-title"><div><h3>Wi-Fi readings</h3><p>Latest wireless adapter measurements</p></div><span class="small text-secondary">${networkState ? `Observed ${escapeHtml(formatDate(networkState.observed_at, true))}` : "Waiting for agent data"}</span></div>${wifiContent}</section>`;
 }
 
 function drawMonitoringChart(rows) {
   const canvas = document.querySelector("#monitoring-chart");
   if (!canvas || !window.Chart) return;
+  state.chart?.destroy();
+  state.chart = null;
   const ordered = [...rows].reverse();
   state.chart = new Chart(canvas, { type: "line", data: { labels: ordered.map((row) => new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(row.recorded_at))), datasets: [{ label: "CPU", data: ordered.map((row) => Number(row.cpu_usage)), borderColor: "#4a7df2", borderWidth: 2, tension: .35, pointRadius: 2 }, { label: "Memory", data: ordered.map((row) => Number(row.ram_usage)), borderColor: "#31b48a", borderWidth: 2, tension: .35, pointRadius: 2 }, { label: "Disk", data: ordered.map((row) => Number(row.disk_usage)), borderColor: "#eda73e", borderWidth: 2, tension: .35, pointRadius: 2 }] }, options: { maintainAspectRatio: false, scales: { y: { min: 0, max: 100, ticks: { callback: (value) => `${value}%` } } } } });
 }
@@ -450,10 +772,59 @@ async function softwarePanel(computer, canManage) {
   const scan = canManage
     ? '<div class="d-flex justify-content-end mb-2"><button class="btn btn-soft btn-sm" data-action="refresh-inventory" data-type="GET_SOFTWARE"><i class="bi bi-arrow-repeat me-1"></i>Scan installed software</button></div>'
     : "";
-  const running = canManage
-    ? `<section class="panel mt-3"><div class="panel-title"><div><h3>Running processes</h3><p>Choose the matching process name and PID to stop a running application. The list refreshes automatically after a Kill EXE request.</p></div></div>${await processesPanel(computer, canManage)}</section>`
+  return `${scan}${installed}`;
+}
+
+async function applicationsPanel(computer, canManage) {
+  const actions = canManage
+    ? '<button class="btn btn-soft btn-sm" data-action="refresh-inventory" data-type="GET_PROCESSES"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>'
     : "";
-  return `${scan}${installed}${running}`;
+  const guidance = state.profile.role === "administrator"
+    ? "Shows apps with open windows on the Windows taskbar. End Task immediately force-closes the selected process after confirmation; the agent must be paired and online, and the process list must be fresh."
+    : "Shows apps with open windows on the Windows taskbar. Expand an app to inspect its window-owning process. Only administrators can end tasks.";
+  return `<section class="panel"><div class="panel-title"><div><h3>Running applications</h3><p>${guidance}</p></div>${actions}</div>${await runningApplicationsPanel(computer)}</section>`;
+}
+
+async function runningApplicationsPanel(computer) {
+  const { data, error } = await supabase.from("processes")
+    .select("process_id, process_name, application_name, process_started_at, cpu_usage, memory_usage, updated_at")
+    .eq("computer_id", computer.id).eq("is_taskbar_app", true).order("application_name", { ascending: true }).limit(2500);
+  if (error) throw error;
+  const groups = new Map();
+  for (const row of data ?? []) {
+    const name = String(row.application_name || row.process_name || "Unknown application").trim();
+    const key = name.toLowerCase();
+    if (!groups.has(key)) groups.set(key, { name, processes: [] });
+    groups.get(key).processes.push(row);
+  }
+  if (!groups.size) return emptyState("bi-window", "No taskbar applications reported", "Open a desktop app such as Chrome, then refresh the process inventory. The updated agent must be paired and running in the signed-in Windows session.");
+
+  const apps = [...groups.values()].map(group => ({
+    ...group,
+    cpu: group.processes.reduce((sum, row) => sum + (Number(row.cpu_usage) || 0), 0),
+    memory: group.processes.reduce((sum, row) => sum + (Number(row.memory_usage) || 0), 0),
+  })).sort((a, b) => b.memory - a.memory || a.name.localeCompare(b.name));
+  const endTaskButton = row => `<button class="btn btn-sm btn-danger running-app-end-task" type="button" data-action="stop-process" data-id="${escapeHtml(row.process_id)}" data-name="${escapeHtml(row.process_name)}" data-started-at="${escapeHtml(row.process_started_at)}" data-updated-at="${escapeHtml(row.updated_at)}">End Task</button>`;
+  const processAction = row => state.profile.role !== "administrator"
+    ? '<span class="text-secondary small">Administrator only</span>'
+    : processEndTaskUnavailableLabel(computer, row)
+      ? `<span class="text-secondary small">${escapeHtml(processEndTaskUnavailableLabel(computer, row))}</span>`
+    : processDenylist.has(normalizeProcessName(row.process_name))
+      ? '<span class="text-secondary small">Protected process</span>'
+      : !row.process_started_at
+        ? '<span class="text-secondary small">Refresh to verify identity</span>'
+        : endTaskButton(row);
+  return apps.map(app => {
+    const isSingleProcess = app.processes.length === 1;
+    const summaryAction = isSingleProcess
+      ? processAction(app.processes[0])
+      : state.profile.role === "administrator"
+        ? endTaskUnavailableLabel(computer)
+          ? `<span class="text-secondary small">${escapeHtml(endTaskUnavailableLabel(computer))}</span>`
+          : '<span class="running-app-task-hint small">Expand to choose a process</span>'
+        : '<span class="text-secondary small">Administrator only</span>';
+    return `<details class="running-app-group"><summary><span class="running-app-name">${escapeHtml(app.name)}</span><span>${app.processes.length} process${isSingleProcess ? "" : "es"}</span><span>CPU ${app.cpu.toFixed(1)}%</span><span>Memory ${escapeHtml(formatBytes(app.memory))}</span><span class="running-app-summary-action">${summaryAction}</span></summary><div class="running-app-processes">${app.processes.map(row => `<div class="running-app-process"><div><b>${escapeHtml(processExecutableName(row.process_name))}</b><span class="text-secondary small">PID ${escapeHtml(row.process_id)} · ${Number(row.cpu_usage).toFixed(1)}% CPU · ${escapeHtml(formatBytes(row.memory_usage))}</span></div>${isSingleProcess ? "" : processAction(row)}</div>`).join("")}</div></details>`;
+  }).join("");
 }
 
 async function detailTable(computer, table, select, columns, key, { sort = "created_at", ascending = false, searchFields = [] } = {}) {
@@ -470,20 +841,26 @@ async function detailTable(computer, table, select, columns, key, { sort = "crea
   }
   if (error) throw error;
   list.rows = data ?? []; list.count = count ?? 0;
-  return tablePanel({ columns, rows: list.rows, search: list.search, page: list.page, pageSize: list.pageSize, count: list.count, placeholder: `Search ${key}...`, emptyTitle: `No ${key} inventory`, emptyText: "Request an inventory scan from the connected agent." });
+  return tablePanel({ columns, rows: list.rows, search: list.search, searchKey: `detail-${key}`, page: list.page, pageSize: list.pageSize, count: list.count, placeholder: `Search ${key}...`, emptyTitle: `No ${key} inventory`, emptyText: "Request an inventory scan from the connected agent." });
 }
 
 async function processesPanel(computer, canManage) {
   const columns = [
-    { label: "EXECUTABLE", render: (row) => `<b>${escapeHtml(processExecutableName(row.process_name))}</b>` },
+    { label: "COMPUTER", key: "computer_name", render: () => escapeHtml(computer.computer_name) },
+    { label: "APPLICATION", sort: "application_name", render: (row) => `<b>${escapeHtml(row.application_name || row.process_name)}</b><div class="text-secondary small">${escapeHtml(processExecutableName(row.process_name))}</div>` },
     { label: "PID", key: "process_id", sort: "process_id" },
-    { label: "CPU", render: (row) => `${Number(row.cpu_usage).toFixed(1)}%` },
-    { label: "MEMORY", render: (row) => escapeHtml(formatBytes(row.memory_usage)) },
-    { label: "UPDATED", render: (row) => escapeHtml(relativeTime(row.updated_at)) },
-    ...(canManage ? [{ label: "ACTION", render: (row) => processDenylist.has(normalizeProcessName(row.process_name)) ? '<span class="text-secondary small">Protected process</span>' : `<button class="btn btn-sm btn-outline-danger" data-action="stop-process" data-id="${escapeHtml(row.process_id)}" data-name="${escapeHtml(row.process_name)}">Kill EXE</button>` }] : []),
+    { label: "CPU", sort: "cpu_usage", render: (row) => `${Number(row.cpu_usage).toFixed(1)}%` },
+    { label: "MEMORY", sort: "memory_usage", render: (row) => escapeHtml(formatBytes(row.memory_usage)) },
+    { label: "STATUS", render: () => statusBadge("Running") },
+    { label: "STARTED", sort: "process_started_at", render: (row) => row.process_started_at ? escapeHtml(formatDate(row.process_started_at, true)) : '<span class="text-secondary small">Unavailable</span>' },
+    { label: "UPDATED", sort: "updated_at", render: (row) => escapeHtml(relativeTime(row.updated_at)) },
+    ...(canManage ? [{ label: "END TASK", render: (row) => state.profile.role !== "administrator" ? '<span class="text-secondary small">Administrator only</span>' : processEndTaskUnavailableLabel(computer, row) ? `<span class="text-secondary small">${escapeHtml(processEndTaskUnavailableLabel(computer, row))}</span>` : processDenylist.has(normalizeProcessName(row.process_name)) ? '<span class="text-secondary small">Protected process</span>' : `<button class="btn btn-sm btn-danger" data-action="stop-process" data-id="${escapeHtml(row.process_id)}" data-name="${escapeHtml(row.process_name)}" data-started-at="${escapeHtml(row.process_started_at)}" data-updated-at="${escapeHtml(row.updated_at)}">End Task</button>` }] : []),
   ];
   const actions = canManage ? '<button class="btn btn-soft btn-sm" data-action="refresh-inventory" data-type="GET_PROCESSES"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>' : "";
-  return `<div class="d-flex justify-content-end mb-2">${actions}</div>${await detailTable(computer, "processes", "id, process_id, process_name, cpu_usage, memory_usage, updated_at", columns, "processes", { sort: "process_name", ascending: true, searchFields: ["process_name"] })}`;
+  const guidance = state.profile.role === "administrator"
+    ? "Choose End Task to immediately force-close that process. Unsaved work may be lost; protected processes and offline computers cannot be ended."
+    : "Only administrators can end tasks. This list is read-only for your role.";
+  return `<div class="d-flex justify-content-between align-items-start mb-2"><p class="modal-note mb-2">${guidance}</p>${actions}</div>${await detailTable(computer, "processes", "id, process_id, process_name, application_name, process_started_at, cpu_usage, memory_usage, updated_at", columns, "processes", { sort: "process_name", ascending: true, searchFields: ["process_name", "application_name"] })}`;
 }
 
 async function servicesPanel(computer, canManage) {
@@ -516,10 +893,11 @@ async function activityDetail(computer) {
 }
 
 async function commandsDetail(computer) {
+  const statusLabels = { pending: "Pending", received: "Dispatched", processing: "Running", awaiting_confirmation: "Awaiting force confirmation", completed: "Success", failed: "Failed", rejected: "Rejected", expired: "Expired" };
   const columns = [
     { label: "REQUESTED", render: (row) => escapeHtml(formatDate(row.created_at, true)) },
     { label: "COMMAND", key: "command_type" },
-    { label: "STATUS", render: (row) => statusBadge(row.status) },
+    { label: "STATUS", render: (row) => statusBadge(statusLabels[row.status] ?? row.status) },
     { label: "RESULT", render: (row) => escapeHtml(row.error_message || JSON.stringify(row.result || {}).slice(0, 100)) },
     { label: "EXPIRES", render: (row) => escapeHtml(formatDate(row.expires_at, true)) },
   ];
@@ -544,19 +922,80 @@ function confirmPowerAction(computer, type) {
   } });
 }
 
-function confirmStopProcess(computer, processId, processName) {
-  const normalized = normalizeProcessName(processName);
-  if (processDenylist.has(normalized)) return toast("This system process is protected by the denylist.", "warning");
-  showModal({ title: "Kill executable?", body: `<div class="alert alert-warning small">Kill <b>${escapeHtml(processExecutableName(processName))}</b> (PID ${escapeHtml(processId)}) on <b>${escapeHtml(computer.computer_name)}</b>? This immediately ends the app and may lose unsaved work.</div><p class="modal-note">The agent checks its protected process denylist and confirms the PID still belongs to this process before killing it.</p>`, submitLabel: "Queue EXE kill", danger: true, onSubmit: async () => {
-    await queueCommand(computer.id, "STOP_PROCESS", { process_id: Number(processId), process_name: processName }, { notify: false });
-    try {
-      await queueCommand(computer.id, "GET_PROCESSES", {}, { notify: false });
-      toast("EXE kill and automatic process refresh queued. The agent runs them in order.");
-    } catch (error) {
-      toast(`Kill request queued, but the automatic process refresh could not be queued: ${error.message}`, "warning");
+async function waitForAgentCommand(commandId, timeoutMs = 160_000) {
+  const deadline = Date.now() + timeoutMs;
+  const finished = new Set(["completed", "failed", "rejected", "expired", "awaiting_confirmation"]);
+  while (Date.now() < deadline) {
+    const { data, error } = await supabase.from("commands")
+      .select("id, command_type, status, result, error_message, executed_at")
+      .eq("id", commandId).maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("The agent command could not be found.");
+    if (finished.has(data.status)) return data;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return { status: "timeout", error_message: "The agent has not reported an outcome yet." };
+}
+
+async function requestProcessTermination(computer, processId, processName, processStartedAt, force, requestId) {
+  return invoke("admin-api", {
+    action: "terminate_process",
+    computer_id: computer.id,
+    process_id: Number(processId),
+    process_name: processName,
+    process_started_at: processStartedAt,
+    force,
+    force_confirmation: force ? `END TASK ${computer.computer_name}` : undefined,
+    request_id: requestId,
+  });
+}
+
+async function refreshProcessRowsAfterTermination(computer) {
+  try {
+    const refreshId = await queueCommand(computer.id, "GET_PROCESSES", {}, { notify: false });
+    const refresh = await waitForAgentCommand(refreshId);
+    if (refresh.status !== "completed") throw new Error(refresh.error_message || "The agent did not refresh the process inventory.");
+    if (state.view === "computer-detail" && state.detailId === computer.id && ["processes", "applications"].includes(state.detailTab)) {
+      await refreshComputerDetailPanel(state.searchRevision, computer.id, state.detailTab);
     }
-    await navigate("computer-detail", { push: false });
-  } });
+    return true;
+  } catch (error) {
+    return error.message || "The process inventory could not be refreshed.";
+  }
+}
+
+function confirmStopProcess(computer, processId, processName, processStartedAt, processUpdatedAt) {
+  if (state.profile?.role !== "administrator") return toast("Administrator access is required to end a task.", "danger");
+  const unavailable = processEndTaskUnavailableLabel(computer, { process_started_at: processStartedAt, updated_at: processUpdatedAt });
+  if (unavailable) {
+    const messages = {
+      "Pair agent first": "Agent pairing is pending. Pair the agent and wait for a fresh check-in before ending a task.",
+      "Agent pairing revoked": "This computer's agent pairing was revoked. Pair the agent again before ending a task.",
+      "Refresh to verify identity": "Refresh the process list before ending this task so the agent can verify its identity.",
+      "Refresh process list": "This process list is older than two minutes. Refresh it before ending the task.",
+    };
+    return toast(messages[unavailable] || "Refresh the process list before ending this task.", "warning");
+  }
+  const normalized = normalizeProcessName(processName);
+  if (processDenylist.has(normalized)) return toast("This Windows or security process is protected by the agent denylist.", "warning");
+  if (!processStartedAt || !Number.isFinite(Date.parse(processStartedAt))) return toast("Refresh process inventory before ending a task so its identity can be verified.", "warning");
+  const requestId = crypto.randomUUID();
+  showModal({
+    title: `End Task for ${processName}?`,
+    body: `<div class="alert alert-danger small">Immediately force close <b>${escapeHtml(processName)}</b> (PID ${escapeHtml(processId)}) on <b>${escapeHtml(computer.computer_name)}</b>? Unsaved work may be lost.</div><p class="modal-note">The agent verifies the exact process name, PID, and start time. Protected Windows/security processes and processes on an offline computer cannot be ended.</p>`,
+    submitLabel: "End Task Now",
+    danger: true,
+    onSubmit: async () => {
+      if (processEndTaskUnavailableLabel(computer, { process_started_at: processStartedAt, updated_at: processUpdatedAt })) throw new Error("The process inventory is no longer fresh. Refresh the process list and try again.");
+      const queued = await requestProcessTermination(computer, processId, processName, processStartedAt, true, requestId);
+      const result = await waitForAgentCommand(queued.command_id);
+      if (result.status !== "completed" || result.result?.terminated !== true || result.result?.method !== "forced") {
+        throw new Error(result.error_message || result.result?.message || "The agent did not confirm that the process exited.");
+      }
+      const refreshResult = await refreshProcessRowsAfterTermination(computer);
+      toast(`Agent confirmed End Task for ${processName} (PID ${processId}).${refreshResult === true ? "" : " The process inventory refresh is still pending."}`);
+    },
+  });
 }
 
 function confirmServiceAction(computer, type, serviceName) {
@@ -849,7 +1288,7 @@ async function saveSettings(form) {
 
 async function currentComputer() {
   if (!state.detailId) return null;
-  const { data, error } = await supabase.from("computers").select("id, computer_name, device_id, enrollment_status, remote_assistance_enabled, remote_assistance_instructions").eq("id", state.detailId).maybeSingle();
+  const { data, error } = await supabase.from("computers").select("id, computer_name, device_id, status, last_seen, enrollment_status, remote_assistance_enabled, remote_assistance_instructions").eq("id", state.detailId).maybeSingle();
   if (error) throw error;
   return data;
 }
@@ -903,7 +1342,7 @@ function bindAuth() {
 }
 
 async function handleAction(action, element) {
-  if (action === "refresh") return navigate(state.view, { push: false });
+  if (action === "refresh") return refreshCurrentView();
   if (action === "add-computer") return addComputerDialog();
   if (action === "open-computer") return openComputer(element.dataset.id);
   if (action === "invite-user") return inviteUserDialog();
@@ -965,7 +1404,7 @@ async function handleAction(action, element) {
   }
   if (action === "stop-process") {
     const computer = await currentComputer();
-    if (computer) confirmStopProcess(computer, element.dataset.id, element.dataset.name);
+    if (computer) confirmStopProcess(computer, element.dataset.id, element.dataset.name, element.dataset.startedAt, element.dataset.updatedAt);
     return;
   }
   if (action === "service-command") {
@@ -983,6 +1422,7 @@ async function handleAction(action, element) {
 
 function bindApplication() {
   document.addEventListener("click", async (event) => {
+    state.lastInteractionAt = Date.now();
     const target = event.target.closest("[data-action], [data-view]");
     if (target) {
       if (target.dataset.action) {
@@ -1009,18 +1449,37 @@ function bindApplication() {
   });
 
   document.addEventListener("input", (event) => {
+    state.lastInteractionAt = Date.now();
     if (!event.target.matches("[data-search]")) return;
+    const input = event.target;
+    const view = state.view;
+    const detailId = state.detailId;
+    const detailTab = state.detailTab;
+    const revision = ++state.searchRevision;
+    const key = input.dataset.searchKey || (view === "computers" ? "computers" : view === "hardware" ? "hardware" : view === "computer-detail" ? `detail-${detailTab}` : view);
+    const value = input.value;
+    const selectionStart = input.selectionStart;
+    const selectionEnd = input.selectionEnd;
     clearTimeout(state.searchTimer);
-    state.searchTimer = setTimeout(() => {
-      const key = state.view === "computers" ? "computers" : state.view === "hardware" ? "hardware" : state.view === "computer-detail" ? `detail-${state.detailTab}` : state.view;
+    state.searchTimer = setTimeout(async () => {
+      if (state.view !== view || state.detailId !== detailId || state.detailTab !== detailTab) return;
       const list = listState(key);
-      list.search = safeSearch(event.target.value);
+      list.search = safeSearch(value);
       list.page = 1;
-      void navigate(state.view, { push: false });
-    }, 220);
+      try {
+        if (view === "computer-detail") await refreshComputerDetailPanel(revision, detailId, detailTab);
+        else await navigate(view, { push: false, loading: false });
+      } catch (error) { toast(error.message || "Search could not be updated.", "danger"); }
+      if (revision !== state.searchRevision) return;
+      const updatedInput = [...content.querySelectorAll("[data-search]")].find((candidate) => candidate.dataset.searchKey === key) ?? content.querySelector("[data-search]");
+      if (!updatedInput) return;
+      updatedInput.focus({ preventScroll: true });
+      if (typeof selectionStart === "number" && typeof selectionEnd === "number") updatedInput.setSelectionRange(selectionStart, selectionEnd);
+    }, 450);
   });
 
   document.addEventListener("change", (event) => {
+    state.lastInteractionAt = Date.now();
     if (event.target.matches("[data-filter]")) {
       const key = state.view === "computers" ? "computers" : state.view;
       const list = listState(key);
@@ -1042,6 +1501,8 @@ function bindApplication() {
     }
   });
 
+  document.addEventListener("focusin", () => { state.lastInteractionAt = Date.now(); });
+
   window.addEventListener("hashchange", () => { if (state.profile) void navigate(readHashView(), { push: false }); });
   window.addEventListener("popstate", () => { if (state.profile) void navigate(readHashView(), { push: false }); });
 }
@@ -1057,6 +1518,10 @@ function start() {
   bindApplication();
   supabase.auth.onAuthStateChange((event, session) => {
     if (!["INITIAL_SESSION", "SIGNED_IN", "SIGNED_OUT", "USER_UPDATED", "PASSWORD_RECOVERY"].includes(event)) return;
+    const sameActiveUser = Boolean(session?.user?.id && state.user?.id === session.user.id && state.profile);
+    if (sameActiveUser && event === "SIGNED_IN") return;
+    if (sameActiveUser && event === "USER_UPDATED") { state.user = session.user; return; }
+    if (sameActiveUser && event === "PASSWORD_RECOVERY") { setTimeout(accountDialog, 100); return; }
     setTimeout(async () => {
       try {
         await activateSession(session?.user ?? null);

@@ -10,7 +10,7 @@ Open the organization dashboard and sign in with the invited Supabase account. U
 
 ## Fleet and computer details
 
-Use **Computers** to search, filter by state, sort, and page through registered devices. Choose a computer to view overview, hardware, monitoring, software, processes, services, maintenance, troubleshooting, activity, and commands. The available tabs follow the signed-in role. Realtime updates show current database changes; the agent heartbeat interval is approximately 45 seconds.
+Use **Computers** to search, filter by state, sort, and page through registered devices. Choose a computer to view overview, hardware, monitoring, software, applications, processes, services, maintenance, troubleshooting, activity, and commands. The **Applications** tab lists apps with open windows on an active Windows desktop, such as Chrome; pinned taskbar icons without an open window are not included. Expand an app to inspect its window-owning process. The available tabs follow the signed-in role. Realtime updates show current database changes; the agent heartbeat interval is approximately 45 seconds.
 
 ## Maintenance and problems
 
@@ -18,7 +18,7 @@ Administrators and technicians can add maintenance records, schedule work, and r
 
 ## Approved commands
 
-Only an administrator or technician with access to the computer can request an action. Inventory refreshes queue a short-lived read operation. Process stop, service change, restart, and shutdown require confirmation in the dashboard. The local agent can reject commands that are expired, outside its allowlist, or blocked by its denylist. Review the command status and result in the computer's **Commands** tab.
+An administrator or assigned technician can request supported inventory and service actions for computers they can access. Only administrators can end a process. In a computer's **Applications** or **Processes** tab, review the application, process, PID, CPU, memory, running state, and start time, then choose **End Task** and confirm **End Task Now**. This immediately force-closes the selected process and may lose unsaved work. The agent verifies the exact PID/name/start-time identity and rejects stale, expired, protected, duplicate, or unauthorized requests; the computer must be online. The dashboard reports success only after the agent confirms the process exited. Review command progress and results in the computer's **Commands** tab; termination attempts are also recorded in the activity log.
 
 ## Alerts, reports, and activity
 

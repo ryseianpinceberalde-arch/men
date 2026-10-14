@@ -36,6 +36,7 @@ public sealed class AgentWorker(
         var nextPoll = DateTimeOffset.MinValue;
         var lastHardwareRead = DateTimeOffset.MinValue;
         HardwareSnapshot? hardwareSnapshot = null;
+        Task? networkCommand = null;
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -57,12 +58,21 @@ public sealed class AgentWorker(
                 nextHeartbeat = DateTimeOffset.UtcNow + heartbeatInterval;
             }
 
-            if (DateTimeOffset.UtcNow >= nextPoll)
+            if (networkCommand?.IsCompleted == true)
+            {
+                try { await networkCommand; }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+                networkCommand = null;
+            }
+
+            if (networkCommand is null && DateTimeOffset.UtcNow >= nextPoll)
             {
                 try
                 {
                     var command = await client.PollCommandAsync(stoppingToken);
-                    if (command is not null) await ProcessCommandAsync(command, stoppingToken);
+                    if (command?.CommandType == "RUN_NETWORK_SPEED_TEST")
+                        networkCommand = ProcessCommandAsync(command, stoppingToken);
+                    else if (command is not null) await ProcessCommandAsync(command, stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
                 catch (Exception exception) { logger.LogWarning(exception, "Command polling failed; the next poll will retry."); }
@@ -70,12 +80,17 @@ public sealed class AgentWorker(
             }
 
             var untilHeartbeat = nextHeartbeat - DateTimeOffset.UtcNow;
-            var untilPoll = nextPoll - DateTimeOffset.UtcNow;
+            var untilPoll = networkCommand is null ? nextPoll - DateTimeOffset.UtcNow : TimeSpan.FromSeconds(2);
             var delay = TimeSpan.FromMilliseconds(Math.Clamp(Math.Min(untilHeartbeat.TotalMilliseconds, untilPoll.TotalMilliseconds), 250, 2000));
             try { await Task.Delay(delay, stoppingToken); }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
         }
 
+        if (networkCommand is not null)
+        {
+            try { await networkCommand; }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        }
         logger.LogInformation("PC Maintenance Agent stopped for device {DeviceId}.", configuration.DeviceId);
     }
 

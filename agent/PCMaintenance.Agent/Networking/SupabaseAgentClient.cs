@@ -34,6 +34,13 @@ public sealed class SupabaseAgentClient(HttpClient http, DeviceConfigStore confi
     public Task SendHeartbeatAsync(object system, object specs, CancellationToken cancellationToken) =>
         SendWithRetryAsync("heartbeat", new { action = "heartbeat", system, specs }, cancellationToken);
 
+    public async Task<NetworkResponse?> SendNetworkAsync(NetworkSnapshot[] samples, SpeedSnapshot[] speedTests, CancellationToken token)
+    {
+        var response = await SendAuthenticatedAsync(new { action = "network", samples, speed_tests = speedTests }, token);
+        if (!response.IsSuccessStatusCode) throw new HttpRequestException(ReadError(response.Payload, response.StatusCode));
+        return JsonSerializer.Deserialize<NetworkResponse>(response.Payload, JsonOptions);
+    }
+
     public async Task<AgentCommand?> PollCommandAsync(CancellationToken cancellationToken)
     {
         var configuration = configStore.Load();

@@ -1,9 +1,39 @@
 import { supabase } from "./supabase.js";
 
 export async function invoke(name, body = {}) {
-  const { data, error } = await supabase.functions.invoke(name, { body });
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError) throw sessionError;
+  const session = sessionData?.session;
+  const signInMessage = "Your session has expired. Please sign in again.";
+  if (!session?.access_token) throw new Error(signInMessage);
+
+  const send = (accessToken) => supabase.functions.invoke(name, {
+    body,
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  let { data, error } = await send(session.access_token);
+  if (error?.context?.status === 401) {
+    // Auth rejection happens before the action runs. Retry once with the same
+    // body (including the End Task idempotency key), using a refreshed token.
+    const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+    if (refreshError) throw refreshError;
+    if (!refreshed?.session?.access_token || refreshed.session.user.id !== session.user.id) {
+      throw new Error(signInMessage);
+    }
+    ({ data, error } = await send(refreshed.session.access_token));
+  }
   if (error) {
-    const message = data?.error || error.message || "The request could not be completed.";
+    let responseError;
+    const response = error.context;
+    if (response && typeof response.clone === "function") {
+      try {
+        const payload = await response.clone().json();
+        if (typeof payload?.error === "string" && payload.error.trim()) responseError = payload.error;
+      } catch {
+        // Non-JSON responses fall back to the Functions client's message.
+      }
+    }
+    const message = data?.error || responseError || error.message || "The request could not be completed.";
     throw new Error(message);
   }
   if (data?.error) throw new Error(data.error);

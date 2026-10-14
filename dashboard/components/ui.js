@@ -49,11 +49,12 @@ export function dataTable(columns, rows, { emptyTitle = "Nothing here yet", empt
   return `<div class="table-overflow"><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
-export function tablePanel({ columns, rows, search = "", placeholder = "Search records...", filters = "", tools = "", page = 1, pageSize = 10, count = rows.length, onPage = true, emptyTitle, emptyText, icon }) {
+export function tablePanel({ columns, rows, search = "", searchKey = "", placeholder = "Search records...", filters = "", tools = "", page = 1, pageSize = 10, count = rows.length, onPage = true, emptyTitle, emptyText, icon }) {
   const from = count ? ((page - 1) * pageSize + 1) : 0;
   const to = Math.min(page * pageSize, count);
   const pages = Math.max(1, Math.ceil(count / pageSize));
-  return `<section class="table-card"><div class="table-toolbar"><div class="toolbar-left"><label class="search-wrap"><i class="bi bi-search"></i><input class="search-input" data-search placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(search)}" aria-label="Search"></label>${filters}</div><div class="toolbar-right">${tools}</div></div>${dataTable(columns, rows, { emptyTitle, emptyText, icon })}${onPage ? `<div class="table-pagination"><span>Showing ${from}–${to} of ${count} records</span><div class="pagination-buttons"><button class="page-btn" data-action="page" data-page="${Math.max(1, page - 1)}" ${page <= 1 ? "disabled" : ""}><i class="bi bi-chevron-left"></i></button><span class="page-btn active">${page} / ${pages}</span><button class="page-btn" data-action="page" data-page="${Math.min(pages, page + 1)}" ${page >= pages ? "disabled" : ""}><i class="bi bi-chevron-right"></i></button></div></div>` : ""}</section>`;
+  const searchKeyAttribute = searchKey ? `data-search-key="${escapeHtml(searchKey)}"` : "";
+  return `<section class="table-card"><div class="table-toolbar"><div class="toolbar-left"><label class="search-wrap"><i class="bi bi-search"></i><input class="search-input" data-search ${searchKeyAttribute} placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(search)}" aria-label="Search"></label>${filters}</div><div class="toolbar-right">${tools}</div></div>${dataTable(columns, rows, { emptyTitle, emptyText, icon })}${onPage ? `<div class="table-pagination"><span>Showing ${from}–${to} of ${count} records</span><div class="pagination-buttons"><button class="page-btn" data-action="page" data-page="${Math.max(1, page - 1)}" ${page <= 1 ? "disabled" : ""}><i class="bi bi-chevron-left"></i></button><span class="page-btn active">${page} / ${pages}</span><button class="page-btn" data-action="page" data-page="${Math.min(pages, page + 1)}" ${page >= pages ? "disabled" : ""}><i class="bi bi-chevron-right"></i></button></div></div>` : ""}</section>`;
 }
 
 export function toast(message, kind = "success") {

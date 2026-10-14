@@ -49,7 +49,7 @@ Send `x-cron-secret: YOUR_PRIVATE_CRON_SECRET`, store that value as an Edge Func
 
 ## Database and RLS
 
-The migration is `supabase/migrations/202610070001_initial_schema.sql`. It creates the requested inventory, monitoring, commands, maintenance, alert, profile, and audit tables, helper functions, indexes, audit triggers, and policies. Review [database.md](database.md) before applying it to a non-empty project. This project treats one Supabase project as one organization.
+Apply all files under `supabase/migrations/` in filename order with `supabase db push`. The initial migration creates the inventory, monitoring, commands, maintenance, alert, profile, and audit tables, helper functions, indexes, audit triggers, and policies. Later migrations add Realtime publication members and the administrator-only process termination lifecycle, including start-time identity checks and command-linked audit records. Review [database.md](database.md) before applying them to a non-empty project. This project treats one Supabase project as one organization.
 
 ## Production deployment
 
