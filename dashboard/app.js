@@ -41,8 +41,6 @@ const navItems = [
   { id: "software", label: "Software Inventory", icon: "bi-box-seam", adminTech: true },
   { section: "NETWORK", adminTech: true },
   { id: "network", label: "Network Overview", icon: "bi-diagram-3", adminTech: true },
-  { id: "wifi", label: "Wi-Fi Monitoring", icon: "bi-wifi", adminTech: true },
-  { id: "internet", label: "Internet Monitoring", icon: "bi-globe2", adminTech: true },
   { section: "SERVICE DESK" },
   { id: "maintenance", label: "Maintenance", icon: "bi-wrench-adjustable" },
   { id: "schedules", label: "Maintenance Schedule", icon: "bi-calendar3", adminTech: true },
@@ -159,6 +157,7 @@ function readHashView() {
     return "computer-detail";
   }
   const requested = hash.split("/")[0];
+  if (["wifi", "internet"].includes(requested)) return "network";
   const valid = navItems.filter((item) => item.id).map((item) => item.id);
   return valid.includes(requested) ? requested : "dashboard";
 }
